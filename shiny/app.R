@@ -332,9 +332,89 @@ move_sort_method_to_bottom <- function(method_levels, sort_method) {
   c(setdiff(method_levels, sort_method), sort_method)
 }
 
-make_expression_heatmap_data <- function(method_data, gene_symbol, sort_method = NULL, sort_mode = "expression") {
+make_contrast_cluster_palette <- function(n_colors) {
+  if (n_colors <= 0) {
+    return(character())
+  }
+
+  if (n_colors == 1) {
+    return("#1B9E77")
+  }
+
+  make_hcl_hex <- function(h, c, l) {
+    grDevices::hcl(h = h %% 360, c = c, l = l)
+  }
+
+  anchor_hues <- c(15, 195)
+  split_offsets <- c(-32, 32, -58, 58, -85, 85, -120, 120, -150, 150)
+  luminance_levels <- c(52, 68)
+  chroma_levels <- c(85, 72)
+
+  candidate_colors <- c()
+  for (lum in luminance_levels) {
+    for (chr in chroma_levels) {
+      for (anchor in anchor_hues) {
+        candidate_colors <- c(candidate_colors, make_hcl_hex(anchor, chr, lum))
+        for (offset in split_offsets) {
+          candidate_colors <- c(candidate_colors, make_hcl_hex(anchor + offset, chr, lum))
+        }
+      }
+    }
+  }
+
+  candidate_count <- max(24, n_colors * 8)
+  candidate_colors <- unique(c(
+    candidate_colors,
+    grDevices::hcl.colors(candidate_count, palette = "Dynamic"),
+    grDevices::hcl.colors(candidate_count, palette = "Dark 3")
+  ))
+
+  candidate_colors <- candidate_colors[seq_len(min(length(candidate_colors), max(candidate_count, n_colors)))]
+  candidate_rgb <- t(grDevices::col2rgb(candidate_colors) / 255)
+  candidate_lab <- grDevices::convertColor(candidate_rgb, from = "sRGB", to = "Lab", scale.in = 1)
+
+  selected_idx <- integer(n_colors)
+  selected_idx[[1]] <- 1L
+  selected_idx[[2]] <- which.max(rowSums((candidate_lab - matrix(candidate_lab[selected_idx[[1]], ], nrow(candidate_lab), 3, byrow = TRUE))^2))
+
+  available_idx <- setdiff(seq_len(nrow(candidate_lab)), selected_idx[seq_len(2)])
+
+  if (n_colors > 2) {
+    for (i in 3:n_colors) {
+      recent_idx <- selected_idx[seq_len(i - 1)]
+      recent_lab <- candidate_lab[recent_idx, , drop = FALSE]
+      distance_matrix <- vapply(
+        available_idx,
+        function(idx) {
+          rowSums((recent_lab - matrix(candidate_lab[idx, ], nrow(recent_lab), 3, byrow = TRUE))^2)
+        },
+        numeric(length(recent_idx))
+      )
+
+      if (is.null(dim(distance_matrix))) {
+        distance_matrix <- matrix(distance_matrix, nrow = length(recent_idx))
+      }
+
+      candidate_scores <- apply(distance_matrix, 2, function(distances) {
+        primary_gap <- distances[[length(distances)]]
+        secondary_gap <- if (length(distances) >= 2) distances[[length(distances) - 1]] else primary_gap
+        tertiary_gap <- if (length(distances) >= 3) distances[[length(distances) - 2]] else secondary_gap
+        min(primary_gap, secondary_gap * 0.95, tertiary_gap * 0.8, min(distances) * 0.65)
+      })
+
+      next_idx <- available_idx[[which.max(candidate_scores)]]
+      selected_idx[[i]] <- next_idx
+      available_idx <- setdiff(available_idx, next_idx)
+    }
+  }
+
+  candidate_colors[selected_idx]
+}
+
+make_expression_heatmap_data <- function(method_data, gene_symbol, sort_method = NULL, sort_mode = "expression", min_cluster_size = 1) {
   barcode_union <- sort(unique(unlist(purrr::map(method_data, "barcodes"))))
   method_levels <- move_sort_method_to_bottom(purrr::map_chr(method_data, "label"), sort_method)
+  cluster_gap <- 0
 
   plot_data <- purrr::map_dfr(method_data, function(method) {
     values <- rep(NA_real_, length(barcode_union))
@@ -367,6 +447,7 @@ make_expression_heatmap_data <- function(method_data, gene_symbol, sort_method =
 
   cluster_annotations <- tibble::tibble()
   cluster_boundaries <- numeric()
+  excluded_clusters <- tibble::tibble()
 
   if (!is.null(sort_method) && nzchar(sort_method) && sort_method %in% levels(plot_data$method)) {
     sort_method_data <- method_data[[match(sort_method, purrr::map_chr(method_data, "label"))]]
@@ -380,10 +461,25 @@ make_expression_heatmap_data <- function(method_data, gene_symbol, sort_method =
         cluster = as.character(sort_method_data$meta$seurat_clusters)
       )
 
+      cluster_sizes <- cluster_lookup %>%
+        dplyr::filter(!is.na(cluster)) %>%
+        dplyr::count(cluster, name = "cluster_size") %>%
+        dplyr::arrange(dplyr::desc(cluster_size), cluster)
+
+      included_clusters <- cluster_sizes %>%
+        dplyr::filter(cluster_size >= min_cluster_size) %>%
+        dplyr::pull(cluster)
+
+      excluded_clusters <- cluster_sizes %>%
+        dplyr::filter(cluster_size < min_cluster_size) %>%
+        dplyr::arrange(cluster_size, cluster)
+
       sort_reference <- sort_reference %>%
         dplyr::left_join(cluster_lookup, by = "barcode") %>%
         dplyr::mutate(
-          cluster = factor(cluster, levels = arrange_cluster_levels(stats::na.omit(cluster)))
+          cluster_original = cluster,
+          cluster = dplyr::if_else(cluster %in% included_clusters, cluster, NA_character_),
+          cluster = factor(cluster, levels = arrange_cluster_levels(included_clusters))
         )
 
       cluster_summary <- sort_reference %>%
@@ -391,6 +487,10 @@ make_expression_heatmap_data <- function(method_data, gene_symbol, sort_method =
         dplyr::group_by(cluster) %>%
         dplyr::summarise(cluster_median = stats::median(expression, na.rm = TRUE), .groups = "drop") %>%
         dplyr::arrange(cluster_median, cluster)
+
+      cluster_levels_present <- cluster_summary %>%
+        dplyr::pull(cluster) %>%
+        as.character()
 
       sort_reference <- sort_reference %>%
         dplyr::left_join(cluster_summary, by = "cluster") %>%
@@ -405,17 +505,49 @@ make_expression_heatmap_data <- function(method_data, gene_symbol, sort_method =
             expression,
             Inf
           )
-        ) %>%
-        dplyr::arrange(missing_rank, cluster_median, cluster, expression_within_cluster, barcode)
+        )
 
-      cluster_annotations <- sort_reference %>%
-        dplyr::filter(missing_rank == 0L, !is.na(cluster)) %>%
-        dplyr::mutate(x_index = dplyr::row_number()) %>%
+      clustered_reference <- sort_reference %>%
+        dplyr::filter(!is.na(cluster)) %>%
+        dplyr::mutate(
+          cluster = factor(as.character(cluster), levels = cluster_levels_present)
+        ) %>%
+        dplyr::arrange(cluster, missing_rank, expression_within_cluster, barcode) %>%
+        dplyr::mutate(
+          cluster_break = dplyr::if_else(
+            dplyr::row_number() == 1L,
+            0,
+            dplyr::if_else(as.character(cluster) != dplyr::lag(as.character(cluster)), 1, 0)
+          ),
+          gap_index = cumsum(cluster_break),
+          display_x = dplyr::row_number() + gap_index * cluster_gap
+        )
+
+      unclustered_reference <- sort_reference %>%
+        dplyr::filter(is.na(cluster_original)) %>%
+        dplyr::arrange(missing_rank, expression, barcode)
+
+      if (nrow(unclustered_reference) > 0) {
+        unclustered_start <- if (nrow(clustered_reference) > 0) {
+          max(clustered_reference$display_x)
+        } else {
+          0
+        }
+
+        unclustered_reference <- unclustered_reference %>%
+          dplyr::mutate(display_x = unclustered_start + dplyr::row_number())
+      }
+
+      sort_reference <- dplyr::bind_rows(clustered_reference, unclustered_reference)
+
+      cluster_annotations <- clustered_reference %>%
         dplyr::group_by(cluster) %>%
         dplyr::summarise(
-          x = mean(range(x_index)),
-          xmin = min(x_index) - 0.5,
-          xmax = max(x_index) + 0.5,
+          x = mean(range(display_x)),
+          x_start = min(display_x),
+          x_end = max(display_x),
+          xmin = min(display_x) - 0.5,
+          xmax = max(display_x) + 0.5,
           .groups = "drop"
         ) %>%
         dplyr::mutate(
@@ -423,22 +555,25 @@ make_expression_heatmap_data <- function(method_data, gene_symbol, sort_method =
           sort_method = sort_method
         )
 
-      cluster_boundaries <- cluster_annotations %>%
-        dplyr::arrange(xmin) %>%
-        dplyr::mutate(boundary = xmax) %>%
-        dplyr::pull(boundary)
-
-      if (length(cluster_boundaries) > 0) {
-        cluster_boundaries <- cluster_boundaries[-length(cluster_boundaries)]
-      }
+      cluster_boundaries <- clustered_reference %>%
+        dplyr::arrange(display_x) %>%
+        dplyr::mutate(
+          previous_cluster = dplyr::lag(as.character(cluster)),
+          previous_x = dplyr::lag(display_x),
+          boundary_x = (previous_x + display_x) / 2
+        ) %>%
+        dplyr::filter(!is.na(previous_cluster), as.character(cluster) != previous_cluster) %>%
+        dplyr::transmute(boundary_x = floor(boundary_x) + 0.5) %>%
+        dplyr::distinct(boundary_x) %>%
+        dplyr::pull(boundary_x)
 
       if (nrow(cluster_annotations) > 0) {
-        cluster_palette <- grDevices::hcl.colors(nrow(cluster_annotations), palette = "Dark 3")
+        cluster_palette <- make_contrast_cluster_palette(nrow(cluster_annotations))
         cluster_annotations <- cluster_annotations %>%
           dplyr::arrange(x) %>%
           dplyr::mutate(
             cluster_color = cluster_palette,
-            label_y = -0.9
+            label_y = dplyr::if_else(dplyr::row_number() %% 2 == 1, -0.24, -0.48)
           )
       }
     } else {
@@ -446,31 +581,44 @@ make_expression_heatmap_data <- function(method_data, gene_symbol, sort_method =
         dplyr::mutate(
           missing_rank = ifelse(is.na(expression), 1L, 0L)
         ) %>%
-        dplyr::arrange(missing_rank, expression, barcode)
+        dplyr::arrange(missing_rank, expression, barcode) %>%
+        dplyr::mutate(display_x = dplyr::row_number())
     }
 
     barcode_levels <- sort_reference %>%
       dplyr::pull(barcode) %>%
       as.character()
 
+    barcode_positions <- sort_reference %>%
+      dplyr::transmute(
+        barcode = as.character(barcode),
+        display_x = display_x
+      )
+
     plot_data <- plot_data %>%
-      dplyr::mutate(barcode = factor(as.character(barcode), levels = barcode_levels))
+      dplyr::mutate(
+        barcode = factor(as.character(barcode), levels = barcode_levels),
+        display_x = barcode_positions$display_x[match(as.character(barcode), barcode_positions$barcode)]
+      ) %>%
+      dplyr::filter(!is.na(display_x))
   }
 
   list(
     plot_data = plot_data,
     cluster_annotations = cluster_annotations,
-    cluster_boundaries = cluster_boundaries
+    cluster_boundaries = cluster_boundaries,
+    excluded_clusters = excluded_clusters
   )
 }
 
 make_expression_heatmap_plot <- function(plot_data, gene_symbol, cluster_annotations = tibble::tibble(), cluster_boundaries = numeric(), sort_mode = "expression", sort_method = NULL, for_pdf = FALSE) {
   method_levels <- levels(plot_data$method)
   n_methods <- length(method_levels)
+  has_display_x <- "display_x" %in% names(plot_data)
 
   plot_data <- plot_data %>%
     dplyr::mutate(
-      x_index = as.integer(barcode),
+      x_index = if (has_display_x) display_x else as.numeric(barcode),
       y_index = n_methods - as.integer(method) + 1
     )
 
@@ -490,21 +638,27 @@ make_expression_heatmap_plot <- function(plot_data, gene_symbol, cluster_annotat
 
   y_axis_text_size <- if (for_pdf) 10 else 8
   plot_title_size <- if (for_pdf) 13 else 11
-  tile_height <- if (for_pdf) 1 else 1.18
-  tile_width <- if (for_pdf) 1 else 1.12
+  # Keep tiles shorter than the row spacing so each method is visually separated.
+  tile_height <- if (for_pdf) 0.84 else 0.92
+  tile_width <- 1
   top_margin <- 48
-  bottom_margin <- if (identical(sort_mode, "cluster") && nrow(cluster_annotations) > 0) 118 else 42
+  bottom_margin <- if (identical(sort_mode, "cluster") && nrow(cluster_annotations) > 0) 84 else 42
+  boundary_bands <- if (identical(sort_mode, "cluster") && length(cluster_boundaries) > 0) {
+    tibble::tibble(x = cluster_boundaries)
+  } else {
+    tibble::tibble()
+  }
 
   p <- ggplot2::ggplot(plot_data, ggplot2::aes(x = x_index, y = y_index, fill = expression)) +
     ggplot2::geom_tile(width = tile_width, height = tile_height) +
-    ggplot2::scale_fill_viridis_c(
-      option = "C",
+    ggplot2::scale_fill_gradientn(
+      colours = c("#313695", "#4575b4", "lightgoldenrod1", "#fdae61", "#f46d43", "#d73027"),
       na.value = "transparent",
       name = paste(gene_symbol, "Normalized gene expression", sep = "\n")
     ) +
     ggplot2::geom_tile(
       data = dplyr::filter(plot_data, cell_status == "barcode_missing"),
-      fill = "white",
+      fill = "black",
       inherit.aes = FALSE,
       ggplot2::aes(x = x_index, y = y_index),
       width = tile_width,
@@ -527,7 +681,7 @@ make_expression_heatmap_plot <- function(plot_data, gene_symbol, cluster_annotat
     ) +
     ggplot2::scale_color_manual(
       values = c(
-        "Barcode missing" = "white",
+        "Barcode missing" = "black",
         "Expression missing/undefined" = "gray75"
       ),
       name = "Cell status"
@@ -563,7 +717,7 @@ make_expression_heatmap_plot <- function(plot_data, gene_symbol, cluster_annotat
     ggplot2::guides(
       color = ggplot2::guide_legend(
         order = 2,
-        override.aes = list(alpha = 1, shape = 22, size = 5, fill = c("white", "gray75"))
+        override.aes = list(alpha = 1, shape = 22, size = 5, fill = c("black", "gray75"))
       ),
       fill = ggplot2::guide_colorbar(order = 1)
     ) +
@@ -586,23 +740,30 @@ make_expression_heatmap_plot <- function(plot_data, gene_symbol, cluster_annotat
     p <- p +
       ggplot2::geom_rect(
         data = cluster_annotations,
-        ggplot2::aes(xmin = xmin, xmax = xmax, ymin = -0.08, ymax = 0.36),
+        ggplot2::aes(
+          xmin = x_start - tile_width / 2,
+          xmax = x_end + tile_width / 2,
+          ymin = -0.08,
+          ymax = 0.36
+        ),
         inherit.aes = FALSE,
         fill = cluster_annotations$cluster_color,
         color = NA,
         show.legend = FALSE
       ) +
       ggplot2::geom_segment(
-        data = tibble::tibble(x = cluster_annotations$xmax[-nrow(cluster_annotations)]),
+        data = boundary_bands,
         ggplot2::aes(
           x = x,
           xend = x,
           y = -0.08,
-          yend = 0.36
+          yend = n_methods + tile_height / 2
         ),
         inherit.aes = FALSE,
-        color = "black",
-        linewidth = 0.18
+        color = "white",
+        linewidth = if (for_pdf) 1.5 else 2.2,
+        lineend = "butt",
+        show.legend = FALSE
       ) +
       ggplot2::annotate(
         "text",
@@ -619,8 +780,11 @@ make_expression_heatmap_plot <- function(plot_data, gene_symbol, cluster_annotat
 
 make_cluster_preview_plot <- function(plot_data, cluster_info, gene_symbol, sort_method = NULL) {
   method_levels <- levels(plot_data$method)
+  has_display_x <- "display_x" %in% names(plot_data)
   preview_data <- plot_data %>%
-    dplyr::mutate(x_index = as.integer(barcode)) %>%
+    dplyr::mutate(
+      x_index = if (has_display_x) display_x else as.numeric(barcode)
+    ) %>%
     dplyr::filter(.data$x_index >= cluster_info$xmin, .data$x_index <= cluster_info$xmax) %>%
     dplyr::mutate(barcode_index = dplyr::dense_rank(.data$x_index))
 
@@ -638,14 +802,14 @@ make_cluster_preview_plot <- function(plot_data, cluster_info, gene_symbol, sort
     )
 
   ggplot2::ggplot(preview_data, ggplot2::aes(x = barcode_index, y = y_index, fill = expression)) +
-    ggplot2::geom_tile(width = 1, height = 1) +
+    ggplot2::geom_tile(width = 1, height = 0.86) +
     ggplot2::geom_tile(
       data = dplyr::filter(preview_data, cell_status == "barcode_missing"),
-      fill = "white",
+      fill = "black",
       inherit.aes = FALSE,
       ggplot2::aes(x = barcode_index, y = y_index),
       width = 1,
-      height = 1
+      height = 0.86
     ) +
     ggplot2::geom_tile(
       data = dplyr::filter(preview_data, cell_status == "expression_missing"),
@@ -653,9 +817,13 @@ make_cluster_preview_plot <- function(plot_data, cluster_info, gene_symbol, sort
       inherit.aes = FALSE,
       ggplot2::aes(x = barcode_index, y = y_index),
       width = 1,
-      height = 1
+      height = 0.86
     ) +
-    ggplot2::scale_fill_viridis_c(option = "C", na.value = "transparent", guide = "none") +
+    ggplot2::scale_fill_gradientn(
+      colours = c("#313695", "#4575b4", "lightgoldenrod1", "#fdae61", "#f46d43", "#d73027"),
+      na.value = "transparent",
+      guide = "none"
+    ) +
     ggplot2::scale_x_continuous(breaks = NULL, expand = c(0, 0)) +
     ggplot2::scale_y_continuous(
       breaks = NULL,
@@ -734,6 +902,10 @@ ui <- fluidPage(
             selected = "expression"
           ),
           selectInput("heatmap_sort_method", "Sort barcodes by method", choices = c()),
+          conditionalPanel(
+            condition = "input.heatmap_sort_mode === 'cluster'",
+            numericInput("heatmap_min_cluster_size", "Minimum cells per cluster", value = 1, min = 1, step = 1)
+          ),
           actionButton("refresh_heatmap", "Refresh gene list")
           ,
           downloadButton("download_heatmap_pdf", "Download hi-res PDF")
@@ -744,7 +916,7 @@ ui <- fluidPage(
             style = "position: relative;",
             plotOutput(
               "expression_heatmap",
-              height = "620px",
+              height = "590px",
               hover = hoverOpts("expression_heatmap_hover", delay = 80, delayType = "debounce")
             ),
             uiOutput("cluster_hover_tooltip")
@@ -752,10 +924,12 @@ ui <- fluidPage(
           conditionalPanel(
             condition = "input.heatmap_sort_mode === 'cluster'",
             tags$div(
-              style = "margin-top: 10px; font-size: 12px; color: #555;",
+              style = "margin-top: 4px; margin-bottom: 10px; font-size: 12px; color: #555;",
               "Hover over cluster annotations to obtain the cluster id"
             )
           ),
+          uiOutput("excluded_clusters_header"),
+          tableOutput("excluded_clusters_table"),
           verbatimTextOutput("heatmap_status")
         )
       )
@@ -894,7 +1068,8 @@ server <- function(input, output, session) {
       methods,
       input$heatmap_gene,
       input$heatmap_sort_method,
-      input$heatmap_sort_mode
+      input$heatmap_sort_mode,
+      min_cluster_size = if (is.null(input$heatmap_min_cluster_size)) 1 else input$heatmap_min_cluster_size
     )
   })
 
@@ -1002,6 +1177,35 @@ server <- function(input, output, session) {
     )
   }, res = 120)
 
+  output$excluded_clusters_header <- renderUI({
+    heatmap_obj <- heatmap_data()
+    excluded_clusters <- heatmap_obj$excluded_clusters
+
+    if (!identical(input$heatmap_sort_mode, "cluster") || nrow(excluded_clusters) == 0) {
+      return(NULL)
+    }
+
+    tags$div(
+      style = "margin-top: 8px; font-size: 13px;",
+      tags$strong("Excluded clusters")
+    )
+  })
+
+  output$excluded_clusters_table <- renderTable({
+    heatmap_obj <- heatmap_data()
+    excluded_clusters <- heatmap_obj$excluded_clusters
+
+    if (!identical(input$heatmap_sort_mode, "cluster") || nrow(excluded_clusters) == 0) {
+      return(NULL)
+    }
+
+    excluded_clusters %>%
+      dplyr::rename(
+        Cluster = cluster,
+        `Cell barcodes` = cluster_size
+      )
+  }, striped = TRUE, bordered = TRUE, spacing = "xs")
+
   output$download_heatmap_pdf <- downloadHandler(
     filename = function() {
       gene_label <- if (!is.null(input$heatmap_gene) && nzchar(input$heatmap_gene)) {
@@ -1048,6 +1252,7 @@ server <- function(input, output, session) {
   })
 
   output$heatmap_status <- renderText({
+    heatmap_obj <- heatmap_data()
     methods <- all_method_data()
     barcode_union <- sort(unique(unlist(purrr::map(methods, "barcodes"))))
     feature_union <- methods %>%
@@ -1055,11 +1260,23 @@ server <- function(input, output, session) {
       dplyr::bind_rows() %>%
       dplyr::distinct(gene_symbol) %>%
       nrow()
+    cluster_filter_text <- if (identical(input$heatmap_sort_mode, "cluster")) {
+      paste0(
+        " Cluster filter: minimum ",
+        if (is.null(input$heatmap_min_cluster_size)) 1 else input$heatmap_min_cluster_size,
+        " cells; excluded ",
+        nrow(heatmap_obj$excluded_clusters),
+        " clusters."
+      )
+    } else {
+      ""
+    }
 
     paste0(
       "Loaded ", length(methods), " methods. Heatmap rows are methods, columns are the union of ",
       length(barcode_union), " cell barcodes, and gene choices cover ",
-      feature_union, " gene symbols."
+      feature_union, " gene symbols.",
+      cluster_filter_text
     )
   })
 }
