@@ -286,6 +286,7 @@ make_expression_heatmap_data <- function(method_data, gene_symbol, sort_method =
         dplyr::mutate(
           cluster = factor(as.character(cluster), levels = cluster_levels_present)
         ) %>%
+        droplevels() %>%
         dplyr::arrange(cluster, missing_rank, expression_within_cluster, barcode) %>%
         dplyr::mutate(
           cluster_break = dplyr::if_else(
