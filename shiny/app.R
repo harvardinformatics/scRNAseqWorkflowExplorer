@@ -406,11 +406,24 @@ ui <- fluidPage(
       sidebarLayout(
         sidebarPanel(
           width = 5,
-          helpText("Select two methods (.rds) with matching bootstrap TSV files."),
+          shiny::tagList(
+            helpText("Select two Seurat objects representing different workflows (.rds) with matching clustering-from-downsampling (.tsv) files."),
+            helpText("Based upon the user-specified Jaccard similarity threshold:"),
+            tags$ul(
+              tags$li("Distributions of the number of intra-method stable clusters are calculated, where stability is defined by similarity to clusters in the original data, and plotted as violin-boxplot combinations."),
+              tags$li("From the original full-data objects, inter-method stable clusters are calculated in a similar fashion and are represented as a horizontal dashed line."),
+              tags$li(
+                HTML("For each method, the null hypothesis <i>H</i><sub>0</sub>: number of intra-method stable clusters = number of inter-method stable clusters is evaluated with a Wilcoxon signed-rank test.")
+              )
+            )
+          ),
           selectInput("method1", "Method 1", choices = NULL),
+          textInput("method1_label", "Method 1 label", value = "", placeholder = "Defaults to selected file name"),
           selectInput("method2", "Method 2", choices = NULL),
+          textInput("method2_label", "Method 2 label", value = "", placeholder = "Defaults to selected file name"),
           numericInput("threshold", "Minimum Jaccard threshold", value = 0.6, min = 0, max = 1, step = 0.01),
-          actionButton("refresh", "Refresh file list")
+          actionButton("refresh", "Refresh file list"),
+          downloadButton("download_stability_pdf", "Download hi-res PDF")
         ),
         mainPanel(
           width = 7,
@@ -545,9 +558,24 @@ server <- function(input, output, session) {
       meta1 = read_seurat_meta(input$method1),
       meta2 = read_seurat_meta(input$method2),
       b1 = read_bootstrap_tsv(boot1),
-      b2 = read_bootstrap_tsv(boot2),
-      l1 = stringr::str_remove(basename(input$method1), "\\.rds$"),
-      l2 = stringr::str_remove(basename(input$method2), "\\.rds$")
+      b2 = read_bootstrap_tsv(boot2)
+    )
+  })
+
+  stability_plot_labels <- reactive({
+    req(input$method1, input$method2)
+
+    list(
+      l1 = if (!is.null(input$method1_label) && nzchar(trimws(input$method1_label))) {
+        trimws(input$method1_label)
+      } else {
+        stringr::str_remove(basename(input$method1), "\\.rds$")
+      },
+      l2 = if (!is.null(input$method2_label) && nzchar(trimws(input$method2_label))) {
+        trimws(input$method2_label)
+      } else {
+        stringr::str_remove(basename(input$method2), "\\.rds$")
+      }
     )
   })
 
@@ -614,6 +642,7 @@ server <- function(input, output, session) {
 
   output$stability_plot <- renderPlot({
     dat <- loaded_data()
+    labels <- stability_plot_labels()
 
     MakeInterVsIntraStablePlot(
       meta1 = dat$meta1,
@@ -621,10 +650,42 @@ server <- function(input, output, session) {
       bootstraps1 = dat$b1,
       bootstraps2 = dat$b2,
       threshold = input$threshold,
-      label1 = dat$l1,
-      label2 = dat$l2
+      label1 = labels$l1,
+      label2 = labels$l2
     )
   })
+
+  output$download_stability_pdf <- downloadHandler(
+    filename = function() {
+      labels <- stability_plot_labels()
+      label1_slug <- gsub("[^A-Za-z0-9_-]+", "-", labels$l1)
+      label2_slug <- gsub("[^A-Za-z0-9_-]+", "-", labels$l2)
+      paste0(
+        "cluster-stability-",
+        label1_slug,
+        "-vs-",
+        label2_slug,
+        ".pdf"
+      )
+    },
+    content = function(file) {
+      dat <- loaded_data()
+      labels <- stability_plot_labels()
+      grDevices::pdf(file, width = 9.5, height = 6.5, onefile = TRUE)
+      on.exit(grDevices::dev.off(), add = TRUE)
+      print(
+        MakeInterVsIntraStablePlot(
+          meta1 = dat$meta1,
+          meta2 = dat$meta2,
+          bootstraps1 = dat$b1,
+          bootstraps2 = dat$b2,
+          threshold = input$threshold,
+          label1 = labels$l1,
+          label2 = labels$l2
+        )
+      )
+    }
+  )
 
   output$expression_heatmap <- renderPlot({
     heatmap_obj <- heatmap_data()
