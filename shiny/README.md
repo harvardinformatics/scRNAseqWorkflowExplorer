@@ -27,7 +27,7 @@ Rscript -e "shiny::runApp('.')"
 Or from anywhere using the full path:
 
 ```bash
-Rscript -e "shiny::runApp('/Users/adamfreedman/workspace/scRNAseqClusterBootstrap/shiny')"
+Rscript -e "shiny::runApp('/PATH/TO/shiny')"
 ```
 
 Test data are in shinytest.tar. To explore the app's functionality, copy the tarball into `data/` , untar it, and launch the app.
