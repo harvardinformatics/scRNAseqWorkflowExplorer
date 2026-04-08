@@ -166,17 +166,6 @@ resolve_feature_id <- function(method, gene_symbol) {
   match_tbl$feature_id[[1]]
 }
 
-arrange_cluster_levels <- function(cluster_values) {
-  unique_clusters <- unique(cluster_values)
-  suppressWarnings(cluster_numeric <- as.numeric(unique_clusters))
-
-  if (all(!is.na(cluster_numeric))) {
-    unique_clusters[order(cluster_numeric)]
-  } else {
-    sort(unique_clusters)
-  }
-}
-
 move_sort_method_to_bottom <- function(method_levels, sort_method) {
   if (is.null(sort_method) || !nzchar(sort_method) || !(sort_method %in% method_levels)) {
     return(method_levels)
@@ -485,12 +474,41 @@ ui <- fluidPage(
           verbatimTextOutput("heatmap_status")
         )
       )
+    ),
+    tabPanel(
+      "Cluster similarity heatmap",
+      sidebarLayout(
+        sidebarPanel(
+          width = 4,
+          helpText("Select two methods and plot cluster-level Jaccard similarity between their Seurat clusterings."),
+          selectInput("jaccard_method1", "Method 1", choices = NULL),
+          textInput("jaccard_label1", "Method 1 axis label", value = ""),
+          selectInput("jaccard_method2", "Method 2", choices = NULL),
+          textInput("jaccard_label2", "Method 2 axis label", value = ""),
+          numericInput(
+            "jaccard_threshold",
+            "Minimum Jaccard threshold for cell labels",
+            value = 0.6,
+            min = 0,
+            max = 1,
+            step = 0.01
+          ),
+          actionButton("refresh_jaccard", "Refresh method list"),
+          downloadButton("download_jaccard_pdf", "Download hi-res PDF")
+        ),
+        mainPanel(
+          width = 8,
+          plotOutput("jaccard_heatmap", height = "620px"),
+          verbatimTextOutput("jaccard_status")
+        )
+      )
     )
   )
 )
 
 server <- function(input, output, session) {
   method_pairs <- reactiveVal(find_method_pairs("data"))
+  jaccard_label_defaults <- reactiveValues(label1 = NULL, label2 = NULL)
 
   refresh_choices <- function() {
     pairs <- find_method_pairs("data")
@@ -518,15 +536,39 @@ server <- function(input, output, session) {
         selected_method2 <- pairs$rds[[which(pairs$rds != selected_method1)[1]]]
       }
 
+      current_jaccard_method1 <- isolate(input$jaccard_method1)
+      current_jaccard_method2 <- isolate(input$jaccard_method2)
+
+      selected_jaccard_method1 <- if (!is.null(current_jaccard_method1) && current_jaccard_method1 %in% pairs$rds) {
+        current_jaccard_method1
+      } else {
+        selected_method1
+      }
+
+      selected_jaccard_method2 <- if (!is.null(current_jaccard_method2) && current_jaccard_method2 %in% pairs$rds) {
+        current_jaccard_method2
+      } else {
+        selected_method2
+      }
+
+      if (identical(selected_jaccard_method1, selected_jaccard_method2) && nrow(pairs) >= 2) {
+        selected_jaccard_method2 <- pairs$rds[[which(pairs$rds != selected_jaccard_method1)[1]]]
+      }
+
       updateSelectInput(session, "method1", choices = choice_map, selected = selected_method1)
       updateSelectInput(session, "method2", choices = choice_map, selected = selected_method2)
+      updateSelectInput(session, "jaccard_method1", choices = choice_map, selected = selected_jaccard_method1)
+      updateSelectInput(session, "jaccard_method2", choices = choice_map, selected = selected_jaccard_method2)
     } else {
       updateSelectInput(session, "method1", choices = c())
       updateSelectInput(session, "method2", choices = c())
+      updateSelectInput(session, "jaccard_method1", choices = c())
+      updateSelectInput(session, "jaccard_method2", choices = c())
     }
   }
 
   observeEvent(input$refresh, refresh_choices(), ignoreInit = TRUE)
+  observeEvent(input$refresh_jaccard, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_heatmap, {
     current_gene <- isolate(input$heatmap_gene)
     method_pairs(find_method_pairs("data"))
@@ -579,6 +621,23 @@ server <- function(input, output, session) {
     )
   })
 
+  loaded_jaccard_data <- reactive({
+    req(input$jaccard_method1, input$jaccard_method2)
+
+    validate(
+      need(input$jaccard_method1 != input$jaccard_method2, "Pick two different methods."),
+      need(file.exists(input$jaccard_method1), "Method 1 file does not exist."),
+      need(file.exists(input$jaccard_method2), "Method 2 file does not exist.")
+    )
+
+    list(
+      meta1 = read_seurat_meta(input$jaccard_method1),
+      meta2 = read_seurat_meta(input$jaccard_method2),
+      l1 = stringr::str_remove(basename(input$jaccard_method1), "\\.rds$"),
+      l2 = stringr::str_remove(basename(input$jaccard_method2), "\\.rds$")
+    )
+  })
+
   all_method_data <- reactive({
     pairs <- method_pairs()
 
@@ -622,6 +681,32 @@ server <- function(input, output, session) {
       choices = stats::setNames(method_labels, method_labels),
       selected = selected_sort
     )
+  })
+
+  observe({
+    dat <- loaded_jaccard_data()
+
+    current_label1 <- isolate(input$jaccard_label1)
+    current_label2 <- isolate(input$jaccard_label2)
+
+    if (
+      is.null(current_label1) ||
+      !nzchar(current_label1) ||
+      identical(current_label1, jaccard_label_defaults$label1)
+    ) {
+      updateTextInput(session, "jaccard_label1", value = dat$l1)
+    }
+
+    if (
+      is.null(current_label2) ||
+      !nzchar(current_label2) ||
+      identical(current_label2, jaccard_label_defaults$label2)
+    ) {
+      updateTextInput(session, "jaccard_label2", value = dat$l2)
+    }
+
+    jaccard_label_defaults$label1 <- dat$l1
+    jaccard_label_defaults$label2 <- dat$l2
   })
 
   heatmap_data <- reactive({
@@ -704,6 +789,48 @@ server <- function(input, output, session) {
       sort_method = input$heatmap_sort_method
     )
   }, res = 110)
+
+  output$jaccard_heatmap <- renderPlot({
+    dat <- loaded_jaccard_data()
+
+    label1 <- if (!is.null(input$jaccard_label1) && nzchar(input$jaccard_label1)) input$jaccard_label1 else dat$l1
+    label2 <- if (!is.null(input$jaccard_label2) && nzchar(input$jaccard_label2)) input$jaccard_label2 else dat$l2
+
+    jaccard_heatmap_plot(
+      meta1 = dat$meta1,
+      meta2 = dat$meta2,
+      name1 = label1,
+      name2 = label2,
+      threshold = input$jaccard_threshold
+    )
+  }, res = 110)
+
+  output$download_jaccard_pdf <- downloadHandler(
+    filename = function() {
+      dat <- loaded_jaccard_data()
+      paste0("cluster-similarity-heatmap-", dat$l1, "-vs-", dat$l2, ".pdf")
+    },
+    content = function(file) {
+      dat <- loaded_jaccard_data()
+
+      label1 <- if (!is.null(input$jaccard_label1) && nzchar(input$jaccard_label1)) input$jaccard_label1 else dat$l1
+      label2 <- if (!is.null(input$jaccard_label2) && nzchar(input$jaccard_label2)) input$jaccard_label2 else dat$l2
+
+      pdf_width <- 6.3
+      pdf_height <- 6.3
+
+      grDevices::pdf(file, width = pdf_width, height = pdf_height, onefile = TRUE)
+      on.exit(grDevices::dev.off(), add = TRUE)
+      print(jaccard_heatmap_plot(
+        meta1 = dat$meta1,
+        meta2 = dat$meta2,
+        name1 = label1,
+        name2 = label2,
+        threshold = input$jaccard_threshold,
+        for_pdf = TRUE
+      ))
+    }
+  )
 
   hovered_cluster_info <- reactive({
     heatmap_obj <- heatmap_data()
@@ -823,9 +950,8 @@ server <- function(input, output, session) {
         need(any(!is.na(plot_data$expression)), "Selected gene symbol was not found in the loaded methods.")
       )
 
-      n_methods <- length(levels(plot_data$method))
-      pdf_width <- 10
-      pdf_height <- max(6.5, min(9, n_methods * 0.55 + 3.5))
+      pdf_width <- 7
+      pdf_height <- 6
 
       grDevices::pdf(file, width = pdf_width, height = pdf_height, onefile = TRUE)
       on.exit(grDevices::dev.off(), add = TRUE)
@@ -877,6 +1003,27 @@ server <- function(input, output, session) {
       length(barcode_union), " cell barcodes, and gene choices cover ",
       feature_union, " gene symbols.",
       cluster_filter_text
+    )
+  })
+
+  output$jaccard_status <- renderText({
+    dat <- loaded_jaccard_data()
+
+    label1 <- if (!is.null(input$jaccard_label1) && nzchar(input$jaccard_label1)) input$jaccard_label1 else dat$l1
+    label2 <- if (!is.null(input$jaccard_label2) && nzchar(input$jaccard_label2)) input$jaccard_label2 else dat$l2
+
+    paste0(
+      "Comparing ",
+      dat$l1,
+      " vs ",
+      dat$l2,
+      ". Axis labels: ",
+      label1,
+      " / ",
+      label2,
+      ". Heatmap cells at or above ",
+      format(input$jaccard_threshold, trim = TRUE),
+      " are annotated."
     )
   })
 }

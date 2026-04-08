@@ -4,6 +4,147 @@ jaccard_similarity <- function(set1, set2) {
   intersect_length / union_length
 }
 
+arrange_cluster_levels <- function(cluster_values) {
+  unique_clusters <- unique(cluster_values)
+  suppressWarnings(cluster_numeric <- as.numeric(unique_clusters))
+
+  if (all(!is.na(cluster_numeric))) {
+    unique_clusters[order(cluster_numeric)]
+  } else {
+    sort(unique_clusters)
+  }
+}
+
+jaccard_heatmap_plot <- function(meta1, meta2,
+                                 name1, name2, threshold = 0.6,
+                                 for_pdf = FALSE) {
+  clusters1 <- tibble::tibble(
+    cellbarcode = rownames(meta1),
+    clusterid1 = as.character(meta1$seurat_clusters)
+  )
+
+  clusters2 <- tibble::tibble(
+    cellbarcode = rownames(meta2),
+    clusterid2 = as.character(meta2$seurat_clusters)
+  )
+
+  clusters_merged <- dplyr::full_join(clusters1, clusters2, by = "cellbarcode")
+
+  indices1 <- split(seq_len(nrow(clusters_merged)), clusters_merged$clusterid1)
+  indices2 <- split(seq_len(nrow(clusters_merged)), clusters_merged$clusterid2)
+
+  indices1 <- indices1[!is.na(names(indices1))]
+  indices2 <- indices2[!is.na(names(indices2))]
+
+  jaccard_list <- list()
+  for (i in names(indices1)) {
+    for (j in names(indices2)) {
+      similarity <- jaccard_similarity(indices1[[i]], indices2[[j]])
+      jaccard_list[[length(jaccard_list) + 1]] <- list(
+        cluster1 = i,
+        cluster2 = j,
+        jaccard_similarity = similarity
+      )
+    }
+  }
+
+  jaccard_df <- do.call(rbind, lapply(jaccard_list, as.data.frame))
+  jaccard_df <- type.convert(jaccard_df, as.is = TRUE)
+
+  jaccard_df$cluster1 <- factor(
+    jaccard_df$cluster1,
+    levels = arrange_cluster_levels(as.character(jaccard_df$cluster1))
+  )
+  jaccard_df$cluster2 <- factor(
+    jaccard_df$cluster2,
+    levels = arrange_cluster_levels(as.character(jaccard_df$cluster2))
+  )
+
+  label_df <- jaccard_df %>%
+    dplyr::filter(jaccard_similarity >= threshold) %>%
+    dplyr::mutate(
+      jaccard_label = if (for_pdf) "*" else format(round(jaccard_similarity, 2), nsmall = 2)
+    )
+
+  threshold_note <- paste0(
+    "Cluster Jaccard stability\n",
+    "threshold: ",
+    format(threshold, trim = TRUE)
+  )
+  legend_note_df <- tibble::tibble(
+    cluster1 = levels(jaccard_df$cluster1)[[1]],
+    cluster2 = levels(jaccard_df$cluster2)[[1]],
+    threshold_note = threshold_note
+  )
+
+  ggplot2::ggplot(
+    data = jaccard_df,
+    ggplot2::aes(x = cluster1, y = cluster2, fill = jaccard_similarity)
+  ) +
+    ggplot2::geom_tile(color = "black", linewidth = 0.35) +
+    ggplot2::scale_fill_gradient(
+      low = "white",
+      high = "firebrick",
+      breaks = seq(0, 1, 0.2),
+      limits = c(0, 1)
+    ) +
+    ggplot2::geom_text(
+      data = label_df,
+      ggplot2::aes(label = jaccard_label),
+      size = if (for_pdf) 4.2 else 2.8,
+      color = "black",
+      hjust = 0.5,
+      vjust = if (for_pdf) 0.62 else 0.5
+    ) +
+    ggplot2::geom_point(
+      data = legend_note_df,
+      ggplot2::aes(x = cluster1, y = cluster2, alpha = threshold_note),
+      inherit.aes = FALSE,
+      shape = 15,
+      size = 0,
+      show.legend = TRUE
+    ) +
+    ggplot2::scale_x_discrete(name = name1) +
+    ggplot2::scale_y_discrete(name = name2) +
+    ggplot2::scale_alpha_manual(
+      values = stats::setNames(0, threshold_note),
+      guide = ggplot2::guide_legend(
+        order = 2,
+        title = NULL,
+        override.aes = list(alpha = 0, size = 0)
+      )
+    ) +
+    ggplot2::labs(fill = "Jaccard similarity") +
+    ggplot2::coord_equal() +
+    ggplot2::theme_minimal(base_size = 12) +
+    ggplot2::theme(
+      panel.grid.major = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      panel.background = ggplot2::element_blank(),
+      axis.text.x = ggplot2::element_text(size = if (for_pdf) 9 else 10, angle = 90, vjust = 0.5, hjust = 1),
+      axis.text.y = ggplot2::element_text(size = if (for_pdf) 9 else 10),
+      axis.title.x = ggplot2::element_text(size = if (for_pdf) 11.2 else 14),
+      axis.title.y = ggplot2::element_text(size = if (for_pdf) 11.2 else 14),
+      legend.title.align = 0,
+      legend.text.align = 0,
+      legend.box = "vertical",
+      legend.spacing.y = grid::unit(6, "pt")
+    ) +
+    ggplot2::guides(
+      fill = ggplot2::guide_colorbar(order = 1),
+      alpha = ggplot2::guide_legend(
+        order = 2,
+        title = NULL,
+        label.hjust = 0,
+        keywidth = grid::unit(0, "pt"),
+        keyheight = grid::unit(0, "pt"),
+        label.theme = ggplot2::element_text(hjust = 0, margin = ggplot2::margin(l = -8)),
+        default.unit = "pt",
+        override.aes = list(alpha = 0, size = 0)
+      )
+    )
+}
+
 MakeInterVsIntraStablePlot <- function(meta1, meta2,
                                        bootstraps1, bootstraps2,
                                        threshold, label1, label2) {
