@@ -73,21 +73,59 @@ MakeInterVsIntraStablePlot <- function(meta1, meta2,
       levels = c("n_stable_name1", "n_stable_name2")
     ))
 
+  max_y <- max(c(boot_stable_merged$n_clusters, stable_cluster_count), na.rm = TRUE)
+  annotation_offset <- max(0.75, max_y * 0.10)
+  annotation_y <- max_y + annotation_offset
+
+  p_value_data <- boot_stable_merged %>%
+    dplyr::group_by(method) %>%
+    dplyr::summarise(
+      p_value = {
+        test_values <- n_clusters[!is.na(n_clusters)]
+        if (length(test_values) == 0) {
+          NA_real_
+        } else {
+          tryCatch(
+            stats::wilcox.test(test_values, mu = stable_cluster_count, exact = FALSE)$p.value,
+            error = function(e) NA_real_
+          )
+        }
+      },
+      y_pos = max(n_clusters, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::filter(!is.na(p_value), p_value <= 0.05) %>%
+    dplyr::mutate(
+      y_pos = annotation_y,
+      label = paste0("p=", format(signif(p_value, 3), scientific = TRUE, trim = TRUE))
+    )
+
   method_colors <- c(
     n_stable_name1 = "forestgreen",
     n_stable_name2 = "dodgerblue3"
   )
 
-  max_y <- max(c(boot_stable_merged$n_clusters, stable_cluster_count), na.rm = TRUE)
-  upper_y <- max(1, max_y) * 1.15
+  upper_y <- max(
+    max(1, max_y) + (2 * annotation_offset),
+    if (nrow(p_value_data) > 0) max(p_value_data$y_pos) * 1.05 else 0
+  )
   y_break_step <- max(1, floor(max_y / 8))
+  inter_method_legend_label <- paste0(
+    "Inter-method stable clusters\n(Jaccard threshold = ",
+    format(threshold, trim = TRUE),
+    ")"
+  )
+  inter_method_line_data <- tibble::tibble(
+    yintercept = stable_cluster_count,
+    legend_label = inter_method_legend_label
+  )
   label_y <- -max(1, max_y) * 0.08
   label_data <- tibble::tibble(
     method = factor(c("n_stable_name1", "n_stable_name2"),
       levels = c("n_stable_name1", "n_stable_name2")
     ),
     x_pos = c(1.08, 1.92),
-    y_pos = c(label_y * 0.85, label_y * 1.25),
+    y_pos = c(label_y, label_y),
     label = c(label1, label2)
   )
 
@@ -95,22 +133,23 @@ MakeInterVsIntraStablePlot <- function(meta1, meta2,
     ggplot2::ggplot(ggplot2::aes(x = method, y = n_clusters, fill = method, color = method)) +
     ggplot2::geom_hline(yintercept = -0.5, color = "black", linewidth = 0.5) +
     ggplot2::geom_violin(width = 0.7, trim = FALSE, alpha = 0.35, linewidth = 0.9) +
-    ggplot2::geom_hline(yintercept = stable_cluster_count,
-      color = "black", linetype = "dashed", linewidth = 1
-    ) +
-    ggplot2::annotate(
-      "text",
-      x = 1.5,
-      y = stable_cluster_count,
-      label = paste0(
-        "number of inter-method stable clusters, min. Jaccard similarity threshold = ",
-        as.character(threshold)
-      ),
-      vjust = -0.6,
-      size = 5.2,
-      color = "black"
+    ggplot2::geom_hline(
+      data = inter_method_line_data,
+      ggplot2::aes(yintercept = yintercept, linetype = legend_label),
+      inherit.aes = FALSE,
+      color = "black",
+      linewidth = 1,
+      show.legend = TRUE
     ) +
     ggplot2::geom_boxplot(width = 0.1, outlier.shape = NA, fill = "white") +
+    ggplot2::geom_text(
+      data = p_value_data,
+      ggplot2::aes(x = method, y = y_pos, label = label),
+      inherit.aes = FALSE,
+      color = "black",
+      vjust = 0,
+      size = 3.6
+    ) +
     ggplot2::geom_text(
       data = label_data,
       ggplot2::aes(x = x_pos, y = y_pos, label = label, color = method),
@@ -125,6 +164,10 @@ MakeInterVsIntraStablePlot <- function(meta1, meta2,
     ) +
     ggplot2::scale_fill_manual(values = method_colors, guide = "none") +
     ggplot2::scale_color_manual(values = method_colors, guide = "none") +
+    ggplot2::scale_linetype_manual(
+      values = stats::setNames("dashed", inter_method_legend_label),
+      name = NULL
+    ) +
     ggplot2::scale_y_continuous(
       breaks = seq(0, max_y, by = y_break_step),
       expand = ggplot2::expansion(mult = c(0, 0.01))
@@ -142,7 +185,10 @@ MakeInterVsIntraStablePlot <- function(meta1, meta2,
       axis.ticks.y = ggplot2::element_line(color = "black", linewidth = 0.5),
       panel.grid.major = ggplot2::element_blank(),
       panel.grid.minor = ggplot2::element_blank(),
-      plot.margin = ggplot2::margin(10, 10, 46, 10)
+      legend.position = "right",
+      legend.justification = "center",
+      legend.box.margin = ggplot2::margin(0, 0, 0, 8),
+      plot.margin = ggplot2::margin(10, 24, 46, 10)
     )
 }
 
