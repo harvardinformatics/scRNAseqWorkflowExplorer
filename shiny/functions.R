@@ -4,6 +4,149 @@ jaccard_similarity <- function(set1, set2) {
   intersect_length / union_length
 }
 
+make_shared_barcodes_upset_plot <- function(seurat_objects, method_names = NULL, min_size = 1, for_pdf = FALSE) {
+  if (is.null(names(seurat_objects)) && is.null(method_names)) {
+    stop("Provide `method_names` or a named list of Seurat objects.")
+  }
+
+  if (!is.list(seurat_objects) || length(seurat_objects) == 0) {
+    stop("`seurat_objects` must be a non-empty list of Seurat objects.")
+  }
+
+  if (is.null(method_names)) {
+    method_names <- names(seurat_objects)
+  }
+
+  if (length(method_names) != length(seurat_objects)) {
+    stop("`method_names` must have the same length as `seurat_objects`.")
+  }
+
+  if (length(unique(method_names)) != length(method_names)) {
+    stop("`method_names` must be unique.")
+  }
+
+  if (!is.numeric(min_size) || length(min_size) != 1 || is.na(min_size) || min_size < 1) {
+    stop("`min_size` must be a single number greater than or equal to 1.")
+  }
+
+  min_size <- as.integer(min_size)
+
+  invalid_objects <- !purrr::map_lgl(seurat_objects, inherits, "Seurat")
+  if (any(invalid_objects)) {
+    stop(
+      "All entries in `seurat_objects` must inherit from Seurat. Invalid methods: ",
+      paste(method_names[invalid_objects], collapse = ", ")
+    )
+  }
+
+  barcode_membership <- purrr::map2_dfr(seurat_objects, method_names, function(obj, method_name) {
+    tibble::tibble(
+      cell_barcode = colnames(obj),
+      method = method_name
+    )
+  }) %>%
+    dplyr::bind_rows() %>%
+    dplyr::distinct(cell_barcode, method) %>%
+    dplyr::mutate(member = TRUE) %>%
+    tidyr::pivot_wider(
+      names_from = method,
+      values_from = member,
+      values_fill = FALSE
+    )
+
+  max_intersections <- min(max(1, 2^length(method_names) - 1), 20)
+  base_text_size <- if (for_pdf) 11 else 12
+  intersection_sizes <- barcode_membership %>%
+    dplyr::rowwise() %>%
+    dplyr::mutate(
+      intersection_size = sum(dplyr::c_across(dplyr::all_of(method_names)))
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::filter(intersection_size > 0) %>%
+    dplyr::count(dplyr::across(dplyr::all_of(method_names)), name = "cells", .drop = FALSE) %>%
+    dplyr::filter(cells >= min_size) %>%
+    dplyr::arrange(dplyr::desc(cells))
+
+  annotation_y <- if (nrow(intersection_sizes) > 0) {
+    max(intersection_sizes$cells) * 0.98
+  } else {
+    1
+  }
+  ComplexUpset::upset(
+    barcode_membership,
+    intersect = method_names,
+    name = "Methods",
+    sort_sets = FALSE,
+    themes = list(
+      overall = ggplot2::theme_bw(base_size = base_text_size) +
+        ggplot2::theme(
+          axis.title.x = ggplot2::element_text(),
+          plot.title = ggplot2::element_text(face = "bold"),
+          legend.position = "right",
+          panel.grid.minor = ggplot2::element_blank()
+        ),
+      intersections_matrix = ggplot2::theme(
+        axis.text.x = ggplot2::element_blank(),
+        axis.ticks.x = ggplot2::element_blank(),
+        axis.title.y = ggplot2::element_blank()
+      ),
+      "Shared barcodes" = ggplot2::theme(
+        axis.text.x = ggplot2::element_blank(),
+        axis.ticks.x = ggplot2::element_blank(),
+        axis.title.y = ggplot2::element_blank()
+      ),
+      overall_sizes = ggplot2::theme(
+        axis.text.x = ggplot2::element_text(angle = 45, hjust = 1, vjust = 1),
+        axis.ticks.y = ggplot2::element_blank(),
+        axis.title.y = ggplot2::element_blank(),
+        axis.text.y = ggplot2::element_blank(),
+        plot.margin = ggplot2::margin(l = 18)
+      )
+    ),
+    width_ratio = 0.18,
+    min_size = min_size,
+    n_intersections = max_intersections,
+    base_annotations = list(
+      "Shared barcodes" = ComplexUpset::intersection_size(
+        counts = FALSE
+      ) +
+        ggplot2::coord_cartesian(clip = "off") +
+        ggplot2::annotate(
+          geom = "text",
+          x = Inf,
+          y = annotation_y,
+          label = paste0("minimum intersection size = ", scales::comma(min_size)),
+          color = "black",
+          hjust = 1.12,
+          vjust = 1,
+          size = if (for_pdf) 3.2 else 3
+        ) +
+        ggplot2::annotation_custom(
+          grob = grid::textGrob(
+            "# of cell barcodes",
+            x = grid::unit(if (for_pdf) -3.2 else -2.9, "lines"),
+            y = grid::unit(0.5, "npc"),
+            rot = 90,
+            just = "center",
+            gp = grid::gpar(fontsize = if (for_pdf) 11 else 10)
+          ),
+          xmin = -Inf,
+          xmax = -Inf,
+          ymin = -Inf,
+          ymax = Inf
+        ) +
+        ggplot2::labs(y = NULL)
+    ),
+    set_sizes = ComplexUpset::upset_set_size() +
+      ggplot2::labs(y = "Method total")
+  ) +
+    ggplot2::labs(
+      title = "Shared cell barcodes across methods",
+      subtitle = paste0(length(method_names), " methods; ", scales::comma(nrow(barcode_membership)), " unique barcodes"),
+      x = NULL
+    )
+}
+
 arrange_cluster_levels <- function(cluster_values) {
   unique_clusters <- unique(cluster_values)
   suppressWarnings(cluster_numeric <- as.numeric(unique_clusters))
