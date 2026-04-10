@@ -72,7 +72,6 @@ make_shared_barcodes_upset_plot <- function(seurat_objects, method_names = NULL,
   } else {
     1
   }
-
   ComplexUpset::upset(
     barcode_membership,
     intersect = method_names,
@@ -94,7 +93,7 @@ make_shared_barcodes_upset_plot <- function(seurat_objects, method_names = NULL,
       "Shared barcodes" = ggplot2::theme(
         axis.text.x = ggplot2::element_blank(),
         axis.ticks.x = ggplot2::element_blank(),
-        axis.title.y = ggplot2::element_text(vjust = -70)
+        axis.title.y = ggplot2::element_blank()
       ),
       overall_sizes = ggplot2::theme(
         axis.text.x = ggplot2::element_text(angle = 45, hjust = 1, vjust = 1),
@@ -111,6 +110,7 @@ make_shared_barcodes_upset_plot <- function(seurat_objects, method_names = NULL,
       "Shared barcodes" = ComplexUpset::intersection_size(
         counts = FALSE
       ) +
+        ggplot2::coord_cartesian(clip = "off") +
         ggplot2::annotate(
           geom = "text",
           x = Inf,
@@ -121,7 +121,21 @@ make_shared_barcodes_upset_plot <- function(seurat_objects, method_names = NULL,
           vjust = 1,
           size = if (for_pdf) 3.2 else 3
         ) +
-        ggplot2::labs(y = "# cell barcodes")
+        ggplot2::annotation_custom(
+          grob = grid::textGrob(
+            "# of cell barcodes",
+            x = grid::unit(if (for_pdf) -3.2 else -2.9, "lines"),
+            y = grid::unit(0.5, "npc"),
+            rot = 90,
+            just = "center",
+            gp = grid::gpar(fontsize = if (for_pdf) 11 else 10)
+          ),
+          xmin = -Inf,
+          xmax = -Inf,
+          ymin = -Inf,
+          ymax = Inf
+        ) +
+        ggplot2::labs(y = NULL)
     ),
     set_sizes = ComplexUpset::upset_set_size() +
       ggplot2::labs(y = "Method total")

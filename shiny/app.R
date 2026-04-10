@@ -116,6 +116,35 @@ read_named_seurat_objects <- function(rds_paths) {
   stats::setNames(seurat_objects, object_labels)
 }
 
+default_method_label <- function(rds_path) {
+  stringr::str_remove(basename(rds_path), "\\.rds$")
+}
+
+make_method_label_input_id <- function(rds_path) {
+  paste0(
+    "config_label_",
+    paste(as.character(charToRaw(enc2utf8(normalizePath(rds_path, winslash = "/", mustWork = FALSE)))), collapse = "")
+  )
+}
+
+resolve_method_label <- function(label_map, rds_path) {
+  if (length(label_map) == 0 || is.null(names(label_map)) || !(rds_path %in% names(label_map))) {
+    return(default_method_label(rds_path))
+  }
+
+  label_value <- if (is.list(label_map)) {
+    label_map[[rds_path]]
+  } else {
+    unname(label_map[rds_path])
+  }
+
+  if (length(label_value) == 0 || is.na(label_value) || !nzchar(trimws(label_value))) {
+    return(default_method_label(rds_path))
+  }
+
+  trimws(label_value)
+}
+
 extract_feature_table <- function(obj, assay_name) {
   assay_obj <- obj[[assay_name]]
   feature_ids <- rownames(SeuratObject::GetAssayData(obj, assay = assay_name, layer = "counts"))
@@ -413,6 +442,25 @@ ui <- fluidPage(
   tabsetPanel(
     id = "analysis_tabs",
     tabPanel(
+      "Configuration",
+      sidebarLayout(
+        sidebarPanel(
+          width = 4,
+          helpText("Set method labels here once per session. These labels are reused across the other analysis tabs."),
+          checkboxInput("config_select_all_files", "Select all files", value = TRUE),
+          checkboxGroupInput("config_selected_files", "Included files", choices = c(), selected = c()),
+          actionButton("apply_file_selection", "Apply file selection"),
+          actionButton("refresh_config", "Refresh file list"),
+          actionButton("apply_config_labels", "Apply labels")
+        ),
+        mainPanel(
+          width = 8,
+          uiOutput("method_label_config"),
+          verbatimTextOutput("config_status")
+        )
+      )
+    ),
+    tabPanel(
       "Cluster stability",
       sidebarLayout(
         sidebarPanel(
@@ -429,9 +477,7 @@ ui <- fluidPage(
             )
           ),
           selectInput("method1", "Method 1", choices = NULL),
-          textInput("method1_label", "Method 1 label", value = "", placeholder = "Defaults to selected file name"),
           selectInput("method2", "Method 2", choices = NULL),
-          textInput("method2_label", "Method 2 label", value = "", placeholder = "Defaults to selected file name"),
           numericInput("threshold", "Minimum Jaccard threshold", value = 0.6, min = 0, max = 1, step = 0.01),
           actionButton("refresh", "Refresh file list"),
           downloadButton("download_stability_pdf", "Download hi-res PDF")
@@ -504,9 +550,7 @@ ui <- fluidPage(
           width = 4,
           helpText("Select two methods and plot cluster-level Jaccard similarity between their Seurat clusterings."),
           selectInput("jaccard_method1", "Method 1", choices = NULL),
-          textInput("jaccard_label1", "Method 1 axis label", value = ""),
           selectInput("jaccard_method2", "Method 2", choices = NULL),
-          textInput("jaccard_label2", "Method 2 axis label", value = ""),
           numericInput(
             "jaccard_threshold",
             "Minimum Jaccard threshold for cell labels",
@@ -548,50 +592,53 @@ ui <- fluidPage(
 server <- function(input, output, session) {
   method_pairs <- reactiveVal(find_method_pairs("data"))
   seurat_object_paths <- reactiveVal(find_seurat_object_paths("data"))
-  jaccard_label_defaults <- reactiveValues(label1 = NULL, label2 = NULL)
+  all_seurat_paths <- reactiveVal(find_seurat_object_paths("data"))
+  method_labels <- reactiveVal(list())
+  selected_file_paths <- reactiveVal(find_seurat_object_paths("data"))
+  syncing_file_selection <- reactiveVal(FALSE)
 
-  refresh_choices <- function() {
-    pairs <- find_method_pairs("data")
+  selected_paths_or_all <- function(all_paths, selected_paths) {
+    if (length(all_paths) == 0) {
+      return(character())
+    }
+
+    if (is.null(selected_paths)) {
+      return(all_paths)
+    }
+
+    intersect(selected_paths, all_paths)
+  }
+
+  sync_selected_subset <- function() {
+    selected_paths <- selected_paths_or_all(all_seurat_paths(), selected_file_paths())
+    seurat_object_paths(selected_paths)
+
+    pairs <- find_method_pairs("data") %>%
+      dplyr::filter(.data$rds %in% selected_paths)
     method_pairs(pairs)
-    seurat_object_paths(find_seurat_object_paths("data"))
+
+    label_map <- method_labels()
 
     if (nrow(pairs) > 0) {
-      choice_map <- stats::setNames(pairs$rds, pairs$label)
+      display_labels <- make.unique(
+        purrr::map_chr(pairs$rds, ~ resolve_method_label(label_map, .x)),
+        sep = " "
+      )
+      choice_map <- stats::setNames(pairs$rds, display_labels)
+
       current_method1 <- isolate(input$method1)
       current_method2 <- isolate(input$method2)
-
-      selected_method1 <- if (!is.null(current_method1) && current_method1 %in% pairs$rds) {
-        current_method1
-      } else {
-        pairs$rds[[1]]
-      }
-
+      selected_method1 <- if (!is.null(current_method1) && current_method1 %in% pairs$rds) current_method1 else pairs$rds[[1]]
       fallback_method2 <- if (nrow(pairs) >= 2) pairs$rds[[2]] else pairs$rds[[1]]
-      selected_method2 <- if (!is.null(current_method2) && current_method2 %in% pairs$rds) {
-        current_method2
-      } else {
-        fallback_method2
-      }
-
+      selected_method2 <- if (!is.null(current_method2) && current_method2 %in% pairs$rds) current_method2 else fallback_method2
       if (identical(selected_method1, selected_method2) && nrow(pairs) >= 2) {
         selected_method2 <- pairs$rds[[which(pairs$rds != selected_method1)[1]]]
       }
 
       current_jaccard_method1 <- isolate(input$jaccard_method1)
       current_jaccard_method2 <- isolate(input$jaccard_method2)
-
-      selected_jaccard_method1 <- if (!is.null(current_jaccard_method1) && current_jaccard_method1 %in% pairs$rds) {
-        current_jaccard_method1
-      } else {
-        selected_method1
-      }
-
-      selected_jaccard_method2 <- if (!is.null(current_jaccard_method2) && current_jaccard_method2 %in% pairs$rds) {
-        current_jaccard_method2
-      } else {
-        selected_method2
-      }
-
+      selected_jaccard_method1 <- if (!is.null(current_jaccard_method1) && current_jaccard_method1 %in% pairs$rds) current_jaccard_method1 else selected_method1
+      selected_jaccard_method2 <- if (!is.null(current_jaccard_method2) && current_jaccard_method2 %in% pairs$rds) current_jaccard_method2 else selected_method2
       if (identical(selected_jaccard_method1, selected_jaccard_method2) && nrow(pairs) >= 2) {
         selected_jaccard_method2 <- pairs$rds[[which(pairs$rds != selected_jaccard_method1)[1]]]
       }
@@ -608,19 +655,149 @@ server <- function(input, output, session) {
     }
   }
 
+  refresh_choices <- function() {
+    rds_paths <- find_seurat_object_paths("data")
+    all_seurat_paths(rds_paths)
+
+    selected_paths <- selected_paths_or_all(rds_paths, selected_file_paths())
+    selected_file_paths(selected_paths)
+
+    current_labels <- method_labels()
+    refreshed_labels <- purrr::map(selected_paths, function(path) {
+      resolve_method_label(current_labels, path)
+    })
+    names(refreshed_labels) <- selected_paths
+    method_labels(refreshed_labels)
+
+    file_choice_labels <- stats::setNames(rds_paths, basename(rds_paths))
+    syncing_file_selection(TRUE)
+    on.exit(syncing_file_selection(FALSE), add = TRUE)
+
+    updateCheckboxGroupInput(
+      session,
+      "config_selected_files",
+      choices = file_choice_labels,
+      selected = selected_paths
+    )
+    updateCheckboxInput(
+      session,
+      "config_select_all_files",
+      value = length(selected_paths) == length(rds_paths) && length(rds_paths) > 0
+    )
+
+    sync_selected_subset()
+  }
+
   observeEvent(input$refresh, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_jaccard, refresh_choices(), ignoreInit = TRUE)
+  observeEvent(input$refresh_config, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_upset, refresh_choices(), ignoreInit = TRUE)
+  observeEvent(input$config_select_all_files, {
+    if (isTRUE(syncing_file_selection())) {
+      return()
+    }
+
+    rds_paths <- all_seurat_paths()
+    selected_paths <- if (isTRUE(input$config_select_all_files)) {
+      rds_paths
+    } else {
+      intersect(isolate(input$config_selected_files), rds_paths)
+    }
+
+    syncing_file_selection(TRUE)
+    on.exit(syncing_file_selection(FALSE), add = TRUE)
+    updateCheckboxGroupInput(session, "config_selected_files", selected = selected_paths)
+  }, ignoreInit = TRUE)
+  observeEvent(input$config_selected_files, {
+    if (isTRUE(syncing_file_selection())) {
+      return()
+    }
+
+    rds_paths <- all_seurat_paths()
+    selected_paths <- intersect(input$config_selected_files, rds_paths)
+
+    syncing_file_selection(TRUE)
+    on.exit(syncing_file_selection(FALSE), add = TRUE)
+    updateCheckboxInput(
+      session,
+      "config_select_all_files",
+      value = length(rds_paths) > 0 && length(selected_paths) == length(rds_paths)
+    )
+  }, ignoreInit = TRUE)
+  observeEvent(input$apply_file_selection, {
+    rds_paths <- all_seurat_paths()
+    selected_paths <- selected_paths_or_all(rds_paths, input$config_selected_files)
+    selected_file_paths(selected_paths)
+    sync_selected_subset()
+  }, ignoreInit = TRUE)
   observeEvent(input$refresh_heatmap, {
     current_gene <- isolate(input$heatmap_gene)
-    method_pairs(find_method_pairs("data"))
-    seurat_object_paths(find_seurat_object_paths("data"))
+    refresh_choices()
 
     if (!is.null(current_gene) && nzchar(current_gene)) {
       updateTextInput(session, "heatmap_gene", value = current_gene)
     }
   }, ignoreInit = TRUE)
-  observe(refresh_choices())
+  observeEvent(TRUE, {
+    refresh_choices()
+  }, once = TRUE)
+
+  output$method_label_config <- renderUI({
+    rds_paths <- seurat_object_paths()
+
+    validate(
+      need(length(rds_paths) > 0, "No Seurat .rds files found in ./data.")
+    )
+
+    shiny::tagList(
+      lapply(rds_paths, function(rds_path) {
+        input_id <- make_method_label_input_id(rds_path)
+        current_input_value <- isolate(input[[input_id]])
+        stored_label <- isolate(resolve_method_label(method_labels(), rds_path))
+
+        textInput(
+          inputId = input_id,
+          label = default_method_label(rds_path),
+          value = if (!is.null(current_input_value)) current_input_value else stored_label,
+          placeholder = default_method_label(rds_path)
+        )
+      })
+    )
+  })
+
+  apply_method_labels <- function() {
+    rds_paths <- seurat_object_paths()
+
+    if (length(rds_paths) == 0) {
+      return(invisible(NULL))
+    }
+
+    updated_labels <- stats::setNames(vector("list", length(rds_paths)), rds_paths)
+    existing_labels <- method_labels()
+
+    for (rds_path in rds_paths) {
+      input_value <- input[[make_method_label_input_id(rds_path)]]
+
+      updated_labels[[rds_path]] <- if (is.null(input_value)) {
+        resolve_method_label(existing_labels, rds_path)
+      } else if (!nzchar(trimws(input_value))) {
+        default_method_label(rds_path)
+      } else {
+        trimws(input_value)
+      }
+    }
+
+    method_labels(updated_labels)
+    invisible(NULL)
+  }
+
+  observeEvent(input$apply_config_labels, {
+    apply_method_labels()
+  }, ignoreInit = TRUE)
+
+  observeEvent(seurat_object_paths(), {
+    apply_method_labels()
+  }, ignoreInit = FALSE)
 
   loaded_data <- reactive({
     req(input$method1, input$method2)
@@ -649,18 +826,11 @@ server <- function(input, output, session) {
 
   stability_plot_labels <- reactive({
     req(input$method1, input$method2)
+    label_map <- method_labels()
 
     list(
-      l1 = if (!is.null(input$method1_label) && nzchar(trimws(input$method1_label))) {
-        trimws(input$method1_label)
-      } else {
-        stringr::str_remove(basename(input$method1), "\\.rds$")
-      },
-      l2 = if (!is.null(input$method2_label) && nzchar(trimws(input$method2_label))) {
-        trimws(input$method2_label)
-      } else {
-        stringr::str_remove(basename(input$method2), "\\.rds$")
-      }
+      l1 = resolve_method_label(label_map, input$method1),
+      l2 = resolve_method_label(label_map, input$method2)
     )
   })
 
@@ -683,12 +853,17 @@ server <- function(input, output, session) {
 
   all_method_data <- reactive({
     pairs <- method_pairs()
+    label_map <- method_labels()
 
     validate(
       need(nrow(pairs) > 0, "No valid method pairs found in ./data.")
     )
 
-    purrr::map2(pairs$rds, pairs$boot, read_method_bundle)
+    purrr::map2(pairs$rds, pairs$boot, read_method_bundle) %>%
+      purrr::imap(function(method, idx) {
+        method$label <- resolve_method_label(label_map, pairs$rds[[idx]])
+        method
+      })
   })
 
   all_seurat_objects <- reactive({
@@ -700,6 +875,32 @@ server <- function(input, output, session) {
     )
 
     read_named_seurat_objects(rds_paths)
+  })
+
+  observe({
+    pairs <- method_pairs()
+    label_map <- method_labels()
+
+    if (nrow(pairs) == 0) {
+      updateSelectInput(session, "method1", choices = c())
+      updateSelectInput(session, "method2", choices = c())
+      updateSelectInput(session, "jaccard_method1", choices = c())
+      updateSelectInput(session, "jaccard_method2", choices = c())
+      return()
+    }
+
+    choice_map <- stats::setNames(
+      pairs$rds,
+      make.unique(
+        purrr::map_chr(pairs$rds, ~ resolve_method_label(label_map, .x)),
+        sep = " "
+      )
+    )
+
+    updateSelectInput(session, "method1", choices = choice_map, selected = isolate(input$method1))
+    updateSelectInput(session, "method2", choices = choice_map, selected = isolate(input$method2))
+    updateSelectInput(session, "jaccard_method1", choices = choice_map, selected = isolate(input$jaccard_method1))
+    updateSelectInput(session, "jaccard_method2", choices = choice_map, selected = isolate(input$jaccard_method2))
   })
 
   output$gene_symbol_datalist <- renderUI({
@@ -735,32 +936,6 @@ server <- function(input, output, session) {
       choices = stats::setNames(method_labels, method_labels),
       selected = selected_sort
     )
-  })
-
-  observe({
-    dat <- loaded_jaccard_data()
-
-    current_label1 <- isolate(input$jaccard_label1)
-    current_label2 <- isolate(input$jaccard_label2)
-
-    if (
-      is.null(current_label1) ||
-      !nzchar(current_label1) ||
-      identical(current_label1, jaccard_label_defaults$label1)
-    ) {
-      updateTextInput(session, "jaccard_label1", value = dat$l1)
-    }
-
-    if (
-      is.null(current_label2) ||
-      !nzchar(current_label2) ||
-      identical(current_label2, jaccard_label_defaults$label2)
-    ) {
-      updateTextInput(session, "jaccard_label2", value = dat$l2)
-    }
-
-    jaccard_label_defaults$label1 <- dat$l1
-    jaccard_label_defaults$label2 <- dat$l2
   })
 
   heatmap_data <- reactive({
@@ -846,9 +1021,9 @@ server <- function(input, output, session) {
 
   output$jaccard_heatmap <- renderPlot({
     dat <- loaded_jaccard_data()
-
-    label1 <- if (!is.null(input$jaccard_label1) && nzchar(input$jaccard_label1)) input$jaccard_label1 else dat$l1
-    label2 <- if (!is.null(input$jaccard_label2) && nzchar(input$jaccard_label2)) input$jaccard_label2 else dat$l2
+    label_map <- method_labels()
+    label1 <- resolve_method_label(label_map, input$jaccard_method1)
+    label2 <- resolve_method_label(label_map, input$jaccard_method2)
 
     jaccard_heatmap_plot(
       meta1 = dat$meta1,
@@ -861,22 +1036,33 @@ server <- function(input, output, session) {
 
   output$barcode_upset_plot <- renderPlot({
     seurat_objects <- all_seurat_objects()
+    label_map <- method_labels()
     make_shared_barcodes_upset_plot(
       seurat_objects,
+      method_names = make.unique(
+        purrr::map_chr(seurat_object_paths(), ~ resolve_method_label(label_map, .x)),
+        sep = "_"
+      ),
       min_size = if (is.null(input$upset_min_size)) 1 else input$upset_min_size
     )
   }, res = 110)
 
   output$download_jaccard_pdf <- downloadHandler(
     filename = function() {
-      dat <- loaded_jaccard_data()
-      paste0("cluster-similarity-heatmap-", dat$l1, "-vs-", dat$l2, ".pdf")
+      label_map <- method_labels()
+      paste0(
+        "cluster-similarity-heatmap-",
+        resolve_method_label(label_map, input$jaccard_method1),
+        "-vs-",
+        resolve_method_label(label_map, input$jaccard_method2),
+        ".pdf"
+      )
     },
     content = function(file) {
       dat <- loaded_jaccard_data()
-
-      label1 <- if (!is.null(input$jaccard_label1) && nzchar(input$jaccard_label1)) input$jaccard_label1 else dat$l1
-      label2 <- if (!is.null(input$jaccard_label2) && nzchar(input$jaccard_label2)) input$jaccard_label2 else dat$l2
+      label_map <- method_labels()
+      label1 <- resolve_method_label(label_map, input$jaccard_method1)
+      label2 <- resolve_method_label(label_map, input$jaccard_method2)
 
       pdf_width <- 6.3
       pdf_height <- 6.3
@@ -900,11 +1086,16 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       seurat_objects <- all_seurat_objects()
+      label_map <- method_labels()
 
       grDevices::pdf(file, width = 10, height = 7, onefile = TRUE)
       on.exit(grDevices::dev.off(), add = TRUE)
       print(make_shared_barcodes_upset_plot(
         seurat_objects,
+        method_names = make.unique(
+          purrr::map_chr(seurat_object_paths(), ~ resolve_method_label(label_map, .x)),
+          sep = "_"
+        ),
         min_size = if (is.null(input$upset_min_size)) 1 else input$upset_min_size,
         for_pdf = TRUE
       ))
@@ -1085,11 +1276,31 @@ server <- function(input, output, session) {
     )
   })
 
+  output$config_status <- renderText({
+    rds_paths <- seurat_object_paths()
+    all_paths <- all_seurat_paths()
+    pending_paths <- selected_paths_or_all(all_paths, input$config_selected_files)
+
+    if (length(all_paths) == 0) {
+      return("No Seurat .rds files found in ./data.")
+    }
+
+    paste0(
+      "Pending selection: ",
+      length(pending_paths),
+      " files. Applied selection: ",
+      length(rds_paths),
+      " files out of ",
+      length(all_paths),
+      " detected Seurat objects."
+    )
+  })
+
   output$jaccard_status <- renderText({
     dat <- loaded_jaccard_data()
-
-    label1 <- if (!is.null(input$jaccard_label1) && nzchar(input$jaccard_label1)) input$jaccard_label1 else dat$l1
-    label2 <- if (!is.null(input$jaccard_label2) && nzchar(input$jaccard_label2)) input$jaccard_label2 else dat$l2
+    label_map <- method_labels()
+    label1 <- resolve_method_label(label_map, input$jaccard_method1)
+    label2 <- resolve_method_label(label_map, input$jaccard_method2)
 
     paste0(
       "Comparing ",
