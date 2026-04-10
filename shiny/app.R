@@ -1,6 +1,7 @@
 library(shiny)
 library(tidyverse)
 library(Seurat)
+library(ComplexUpset)
 library(ggrepel)
 source("functions.R")
 
@@ -92,6 +93,27 @@ read_seurat_meta <- function(rds_path) {
 read_bootstrap_tsv <- function(tsv_path) {
   readr::read_tsv(tsv_path, show_col_types = FALSE) %>%
     standardize_bootstrap_cols()
+}
+
+find_seurat_object_paths <- function(data_dir = "data") {
+  list.files(data_dir, pattern = "\\.rds$", full.names = TRUE, recursive = TRUE) %>%
+    sort()
+}
+
+read_named_seurat_objects <- function(rds_paths) {
+  seurat_objects <- purrr::map(rds_paths, readRDS)
+  object_labels <- stringr::str_remove(basename(rds_paths), "\\.rds$") %>%
+    make.unique(sep = "_")
+
+  invalid_objects <- !purrr::map_lgl(seurat_objects, inherits, "Seurat")
+  if (any(invalid_objects)) {
+    stop(
+      "These RDS files are not Seurat objects: ",
+      paste(basename(rds_paths[invalid_objects]), collapse = ", ")
+    )
+  }
+
+  stats::setNames(seurat_objects, object_labels)
 }
 
 extract_feature_table <- function(obj, assay_name) {
@@ -502,17 +524,36 @@ ui <- fluidPage(
           verbatimTextOutput("jaccard_status")
         )
       )
+    ),
+    tabPanel(
+      "Shared barcodes",
+      sidebarLayout(
+        sidebarPanel(
+          width = 4,
+          helpText("Summarize how cell barcodes overlap across all Seurat objects currently present in the data directory."),
+          numericInput("upset_min_size", "Minimum intersection size", value = 1, min = 1, step = 1),
+          actionButton("refresh_upset", "Refresh object list"),
+          downloadButton("download_upset_pdf", "Download hi-res PDF")
+        ),
+        mainPanel(
+          width = 8,
+          plotOutput("barcode_upset_plot", height = "620px"),
+          verbatimTextOutput("upset_status")
+        )
+      )
     )
   )
 )
 
 server <- function(input, output, session) {
   method_pairs <- reactiveVal(find_method_pairs("data"))
+  seurat_object_paths <- reactiveVal(find_seurat_object_paths("data"))
   jaccard_label_defaults <- reactiveValues(label1 = NULL, label2 = NULL)
 
   refresh_choices <- function() {
     pairs <- find_method_pairs("data")
     method_pairs(pairs)
+    seurat_object_paths(find_seurat_object_paths("data"))
 
     if (nrow(pairs) > 0) {
       choice_map <- stats::setNames(pairs$rds, pairs$label)
@@ -569,9 +610,11 @@ server <- function(input, output, session) {
 
   observeEvent(input$refresh, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_jaccard, refresh_choices(), ignoreInit = TRUE)
+  observeEvent(input$refresh_upset, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_heatmap, {
     current_gene <- isolate(input$heatmap_gene)
     method_pairs(find_method_pairs("data"))
+    seurat_object_paths(find_seurat_object_paths("data"))
 
     if (!is.null(current_gene) && nzchar(current_gene)) {
       updateTextInput(session, "heatmap_gene", value = current_gene)
@@ -646,6 +689,17 @@ server <- function(input, output, session) {
     )
 
     purrr::map2(pairs$rds, pairs$boot, read_method_bundle)
+  })
+
+  all_seurat_objects <- reactive({
+    rds_paths <- seurat_object_paths()
+
+    validate(
+      need(length(rds_paths) > 0, "No Seurat .rds files found in ./data."),
+      need(length(rds_paths) >= 2, "At least two Seurat .rds files are required for a barcode overlap summary.")
+    )
+
+    read_named_seurat_objects(rds_paths)
   })
 
   output$gene_symbol_datalist <- renderUI({
@@ -805,6 +859,14 @@ server <- function(input, output, session) {
     )
   }, res = 110)
 
+  output$barcode_upset_plot <- renderPlot({
+    seurat_objects <- all_seurat_objects()
+    make_shared_barcodes_upset_plot(
+      seurat_objects,
+      min_size = if (is.null(input$upset_min_size)) 1 else input$upset_min_size
+    )
+  }, res = 110)
+
   output$download_jaccard_pdf <- downloadHandler(
     filename = function() {
       dat <- loaded_jaccard_data()
@@ -827,6 +889,23 @@ server <- function(input, output, session) {
         name1 = label1,
         name2 = label2,
         threshold = input$jaccard_threshold,
+        for_pdf = TRUE
+      ))
+    }
+  )
+
+  output$download_upset_pdf <- downloadHandler(
+    filename = function() {
+      paste0("shared-cell-barcodes-upset-", format(Sys.Date(), "%Y%m%d"), ".pdf")
+    },
+    content = function(file) {
+      seurat_objects <- all_seurat_objects()
+
+      grDevices::pdf(file, width = 10, height = 7, onefile = TRUE)
+      on.exit(grDevices::dev.off(), add = TRUE)
+      print(make_shared_barcodes_upset_plot(
+        seurat_objects,
+        min_size = if (is.null(input$upset_min_size)) 1 else input$upset_min_size,
         for_pdf = TRUE
       ))
     }
@@ -1024,6 +1103,31 @@ server <- function(input, output, session) {
       ". Heatmap cells at or above ",
       format(input$jaccard_threshold, trim = TRUE),
       " are annotated."
+    )
+  })
+
+  output$upset_status <- renderText({
+    rds_paths <- seurat_object_paths()
+
+    if (length(rds_paths) == 0) {
+      return("No Seurat .rds files found in ./data.")
+    }
+
+    if (length(rds_paths) < 2) {
+      return("Found 1 Seurat object in ./data. At least two are required for the shared-barcode UpSet plot.")
+    }
+
+    seurat_objects <- all_seurat_objects()
+    barcode_union <- sort(unique(unlist(purrr::map(seurat_objects, colnames))))
+
+    paste0(
+      "Loaded ",
+      length(seurat_objects),
+      " Seurat objects from ./data with ",
+      length(barcode_union),
+      " unique cell barcodes across methods. Minimum intersection size: ",
+      if (is.null(input$upset_min_size)) 1 else input$upset_min_size,
+      "."
     )
   })
 }
