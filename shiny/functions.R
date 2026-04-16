@@ -476,6 +476,142 @@ MakeInterVsIntraStablePlot <- function(meta1, meta2,
     )
 }
 
+ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_labels, for_pdf = FALSE) {
+  if (length(meta_list) != length(downsamp_list) || length(meta_list) != length(method_labels)) {
+    stop("meta_list, downsamp_list, and method_labels must have the same length.")
+  }
+
+  if (length(meta_list) == 0) {
+    stop("Provide at least one method.")
+  }
+
+  summary_df <- purrr::map_dfr(seq_along(meta_list), function(i) {
+    meta_tbl <- meta_list[[i]]
+    downsamp_tbl <- downsamp_list[[i]]
+    method <- method_labels[[i]]
+    required_meta_cols <- c("seurat_clusters", "silhouette_width")
+    missing_meta_cols <- setdiff(required_meta_cols, names(meta_tbl))
+    required_downsamp_cols <- c("clusterid", "max_jaccard")
+    missing_downsamp_cols <- setdiff(required_downsamp_cols, names(downsamp_tbl))
+
+    if (length(missing_meta_cols) > 0) {
+      stop(
+        "Metadata for method `",
+        method,
+        "` is missing required column",
+        if (length(missing_meta_cols) > 1) "s: " else ": ",
+        paste0("`", missing_meta_cols, "`", collapse = ", "),
+        "."
+      )
+    }
+
+    if (length(missing_downsamp_cols) > 0) {
+      stop(
+        "Downsampling summary for method `",
+        method,
+        "` is missing required column",
+        if (length(missing_downsamp_cols) > 1) "s: " else ": ",
+        paste0("`", missing_downsamp_cols, "`", collapse = ", "),
+        "."
+      )
+    }
+
+    size_summary <- meta_tbl %>%
+      dplyr::group_by(clusterid = .data[["seurat_clusters"]]) %>%
+      dplyr::summarise(
+        cluster_size = dplyr::n(),
+        .groups = "drop"
+      ) %>%
+      dplyr::mutate(clusterid = as.character(clusterid))
+
+    sil_summary <- meta_tbl %>%
+      dplyr::group_by(clusterid = .data[["seurat_clusters"]]) %>%
+      dplyr::summarise(
+        median_silhouette = median(.data[["silhouette_width"]], na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      dplyr::mutate(clusterid = as.character(clusterid))
+
+    jac_summary <- downsamp_tbl %>%
+      dplyr::mutate(clusterid = as.character(clusterid)) %>%
+      dplyr::group_by(clusterid) %>%
+      dplyr::summarise(
+        median_max_jaccard = median(max_jaccard, na.rm = TRUE),
+        .groups = "drop"
+      )
+
+    sil_summary %>%
+      dplyr::inner_join(jac_summary, by = "clusterid") %>%
+      dplyr::inner_join(size_summary, by = "clusterid") %>%
+      dplyr::mutate(method = method)
+  })
+
+  if (nrow(summary_df) == 0) {
+    stop("No clusters remained after joining silhouette and Jaccard summaries.")
+  }
+
+  summary_df <- summary_df %>%
+    dplyr::mutate(
+      clusterid = factor(clusterid),
+      method = factor(method, levels = method_labels)
+    )
+
+  mid_cs <- stats::median(summary_df$cluster_size, na.rm = TRUE)
+  n_methods <- length(method_labels)
+  facet_cols <- max(1, ceiling(sqrt(n_methods)))
+  max_label_chars <- max(nchar(as.character(method_labels)), na.rm = TRUE)
+  approx_chars_per_panel <- max_label_chars / facet_cols
+  base_strip_size <- if (for_pdf) 11 else 10
+  strip_text_size <- max(
+    if (for_pdf) 5.5 else 5,
+    base_strip_size - max(0, approx_chars_per_panel - 12) * if (for_pdf) 0.28 else 0.34
+  )
+  wrap_width <- max(10, floor(if (for_pdf) 26 / facet_cols else 24 / facet_cols))
+
+  ggplot2::ggplot(
+    summary_df,
+    ggplot2::aes(
+      x = median_silhouette,
+      y = median_max_jaccard,
+      fill = cluster_size
+    )
+  ) +
+    ggplot2::geom_point(
+      shape = 21,
+      color = "black",
+      size = if (for_pdf) 2.6 else 2.2,
+      alpha = 1
+    ) +
+    ggplot2::facet_wrap(
+      ~ method,
+      scales = "fixed",
+      labeller = ggplot2::labeller(method = ggplot2::label_wrap_gen(width = wrap_width))
+    ) +
+    ggplot2::scale_x_continuous(limits = c(-1, 1)) +
+    ggplot2::scale_y_continuous(limits = c(0, 1)) +
+    ggplot2::scale_fill_gradient2(
+      name = "Cluster size",
+      low = "blue",
+      mid = "white",
+      high = "firebrick",
+      midpoint = mid_cs
+    ) +
+    ggplot2::xlab("Median silhouette width") +
+    ggplot2::ylab(expression(paste("Cluster ", stability[Jaccard]))) +
+    ggplot2::theme_bw(base_size = if (for_pdf) 12 else 11) +
+    ggplot2::theme(
+      panel.grid.minor = ggplot2::element_blank(),
+      strip.background = ggplot2::element_rect(fill = "grey95"),
+      strip.text = ggplot2::element_text(
+        face = "bold",
+        size = strip_text_size,
+        lineheight = 0.95,
+        margin = ggplot2::margin(2, 1, 2, 1)
+      ),
+      legend.position = "right"
+    )
+}
+
 make_contrast_cluster_palette <- function(n_colors) {
   if (n_colors <= 0) {
     return(character())
