@@ -30,4 +30,3 @@ Or from anywhere using the full path:
 Rscript -e "shiny::runApp('/PATH/TO/shiny')"
 ```
 
-Test data are in shinytest.tar. To explore the app's functionality, copy the tarball into `data/` , untar it, and launch the app.
