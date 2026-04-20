@@ -497,7 +497,7 @@ ui <- fluidPage(
       )
     ),
     tabPanel(
-      "Cluster stability",
+      "Inter vs. intra-cluster stability",
       sidebarLayout(
         sidebarPanel(
           width = 5,
@@ -609,11 +609,11 @@ ui <- fluidPage(
       )
     ),
     tabPanel(
-      "Silhouette vs stability",
+      "Cluster stability, silhouette width, and size",
       sidebarLayout(
         sidebarPanel(
           width = 4,
-          helpText("For each selected method, plot per-cluster median silhouette width against per-cluster median Jaccard stability from the matching downsampling summary."),
+          helpText("For all selected methods, plot per cluster median Jaccard stability, cluster size, and silhouette width."),
           selectInput(
             "silhouette_stability_x",
             "X-axis",

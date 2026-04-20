@@ -599,17 +599,27 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
       return(label)
     }
 
-    single_line_size <- base_font_size * target_width / max(1, nchar(label))
-    if (!stringr::str_detect(label, "\\s")) {
-      return(label)
+    split_for_strip <- function(text) {
+      text %>%
+        stringr::str_replace_all("([+_-])", "\\1 ") %>%
+        stringr::str_squish() %>%
+        stringr::str_split("\\s+", simplify = FALSE) %>%
+        purrr::pluck(1)
     }
+
+    single_line_size <- base_font_size * target_width / max(1, nchar(label))
+    tokens <- split_for_strip(label)
+    has_break_opportunity <- length(tokens) > 1
 
     should_keep_single_line <- single_line_size >= min_font_size && nchar(label) <= target_width * 0.9
     if (should_keep_single_line) {
       return(label)
     }
 
-    tokens <- stringr::str_split(label, "\\s+", simplify = FALSE)[[1]]
+    if (!has_break_opportunity) {
+      return(label)
+    }
+
     token_count <- length(tokens)
     max_breaks <- min(max_lines - 1, token_count - 1)
 
@@ -626,7 +636,8 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
       for (breaks in break_sets) {
         starts <- c(1, breaks + 1)
         ends <- c(breaks, token_count)
-        lines <- purrr::map2_chr(starts, ends, ~ paste(tokens[.x:.y], collapse = " "))
+        lines <- purrr::map2_chr(starts, ends, ~ paste(tokens[.x:.y], collapse = " ")) %>%
+          stringr::str_replace_all("\\s+([+_-])$", "\\1")
         longest_line <- max(nchar(lines), na.rm = TRUE)
         wrapped_size <- base_font_size * target_width / max(1, longest_line)
 
@@ -651,7 +662,7 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
   facet_cols <- max(1, ceiling(sqrt(n_methods)))
   base_strip_size <- if (for_pdf) 11 else 10
   min_strip_size <- if (for_pdf) 8.5 else 8
-  target_line_chars <- max(12, floor(if (for_pdf) 30 / facet_cols else 26 / facet_cols))
+  target_line_chars <- max(22, floor(if (for_pdf) 56 / facet_cols else 50 / facet_cols))
 
   label_line_width <- function(label) {
     lines <- stringr::str_split(as.character(label), "\n", simplify = FALSE)[[1]]
@@ -675,16 +686,17 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
     ~ min(base_strip_size, base_strip_size * target_line_chars / max(1, .x))
   )
   chosen_idx <- which(candidate_sizes >= min_strip_size)[1]
+  allow_below_min_strip_size <- is.na(chosen_idx)
   if (is.na(chosen_idx)) {
-    chosen_idx <- length(candidate_labels)
+    chosen_idx <- which.max(candidate_sizes)
   }
 
   rendered_method_labels <- candidate_labels[[chosen_idx]]
   longest_rendered_line <- candidate_longest_lines[[chosen_idx]]
-  strip_text_size <- max(
-    min_strip_size,
-    min(base_strip_size, base_strip_size * target_line_chars / max(1, longest_rendered_line))
-  )
+  strip_text_size <- min(base_strip_size, base_strip_size * target_line_chars / max(1, longest_rendered_line))
+  if (!allow_below_min_strip_size) {
+    strip_text_size <- max(min_strip_size, strip_text_size)
+  }
 
   summary_df <- summary_df %>%
     dplyr::mutate(
@@ -733,7 +745,7 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
         hjust = 0.5,
         vjust = 0.5,
         lineheight = 0.95,
-        margin = ggplot2::margin(4, 6, 4, 6)
+        margin = ggplot2::margin(5, 0, 5, 0)
       ),
       legend.position = "right"
     )
