@@ -476,13 +476,45 @@ MakeInterVsIntraStablePlot <- function(meta1, meta2,
     )
 }
 
-ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_labels, for_pdf = FALSE) {
+ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_labels,
+                                             x_metric = "median_silhouette",
+                                             y_metric = "median_max_jaccard",
+                                             color_metric = "cluster_size",
+                                             for_pdf = FALSE) {
   if (length(meta_list) != length(downsamp_list) || length(meta_list) != length(method_labels)) {
     stop("meta_list, downsamp_list, and method_labels must have the same length.")
   }
 
   if (length(meta_list) == 0) {
     stop("Provide at least one method.")
+  }
+
+  metric_specs <- list(
+    median_silhouette = list(
+      label = "Median silhouette width",
+      limits = c(-1, 1),
+      midpoint = 0
+    ),
+    median_max_jaccard = list(
+      label = as.expression(expression(paste("Cluster ", stability[Jaccard]))),
+      limits = c(0, 1),
+      midpoint = 0.5
+    ),
+    cluster_size = list(
+      label = "Cluster size",
+      limits = NULL,
+      midpoint = NULL
+    )
+  )
+
+  selected_metrics <- c(x_metric, y_metric, color_metric)
+  invalid_metrics <- setdiff(selected_metrics, names(metric_specs))
+  if (length(invalid_metrics) > 0) {
+    stop("Unknown silhouette/stability metric selection: ", paste(invalid_metrics, collapse = ", "))
+  }
+
+  if (anyDuplicated(selected_metrics) > 0) {
+    stop("Choose three different metrics for x-axis, y-axis, and color.")
   }
 
   summary_df <- purrr::map_dfr(seq_along(meta_list), function(i) {
@@ -556,24 +588,118 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
       method = factor(method, levels = method_labels)
     )
 
+  x_spec <- metric_specs[[x_metric]]
+  y_spec <- metric_specs[[y_metric]]
+  color_spec <- metric_specs[[color_metric]]
+
+  render_method_strip_label <- function(label, target_width, min_font_size, base_font_size, max_lines = 3) {
+    label <- stringr::str_squish(as.character(label))
+
+    if (!nzchar(label)) {
+      return(label)
+    }
+
+    single_line_size <- base_font_size * target_width / max(1, nchar(label))
+    if (!stringr::str_detect(label, "\\s")) {
+      return(label)
+    }
+
+    should_keep_single_line <- single_line_size >= min_font_size && nchar(label) <= target_width * 0.9
+    if (should_keep_single_line) {
+      return(label)
+    }
+
+    tokens <- stringr::str_split(label, "\\s+", simplify = FALSE)[[1]]
+    token_count <- length(tokens)
+    max_breaks <- min(max_lines - 1, token_count - 1)
+
+    if (max_breaks <= 0) {
+      return(label)
+    }
+
+    best_label <- label
+    best_score <- Inf
+
+    for (break_count in seq_len(max_breaks)) {
+      break_sets <- combn(token_count - 1, break_count, simplify = FALSE)
+
+      for (breaks in break_sets) {
+        starts <- c(1, breaks + 1)
+        ends <- c(breaks, token_count)
+        lines <- purrr::map2_chr(starts, ends, ~ paste(tokens[.x:.y], collapse = " "))
+        longest_line <- max(nchar(lines), na.rm = TRUE)
+        wrapped_size <- base_font_size * target_width / max(1, longest_line)
+
+        if (wrapped_size < min_font_size && wrapped_size <= single_line_size) {
+          next
+        }
+
+        score <- sum((target_width - nchar(lines))^2) + break_count * 8 - wrapped_size * 6
+
+        if (score < best_score) {
+          best_score <- score
+          best_label <- paste(lines, collapse = "\n")
+        }
+      }
+    }
+
+    best_label
+  }
+
   mid_cs <- stats::median(summary_df$cluster_size, na.rm = TRUE)
   n_methods <- length(method_labels)
   facet_cols <- max(1, ceiling(sqrt(n_methods)))
-  max_label_chars <- max(nchar(as.character(method_labels)), na.rm = TRUE)
-  approx_chars_per_panel <- max_label_chars / facet_cols
   base_strip_size <- if (for_pdf) 11 else 10
-  strip_text_size <- max(
-    if (for_pdf) 5.5 else 5,
-    base_strip_size - max(0, approx_chars_per_panel - 12) * if (for_pdf) 0.28 else 0.34
+  min_strip_size <- if (for_pdf) 8.5 else 8
+  target_line_chars <- max(12, floor(if (for_pdf) 30 / facet_cols else 26 / facet_cols))
+
+  label_line_width <- function(label) {
+    lines <- stringr::str_split(as.character(label), "\n", simplify = FALSE)[[1]]
+    max(nchar(lines), na.rm = TRUE)
+  }
+
+  candidate_labels <- purrr::map(
+    1:3,
+    ~ purrr::map_chr(
+      method_labels,
+      render_method_strip_label,
+      target_width = target_line_chars,
+      min_font_size = min_strip_size,
+      base_font_size = base_strip_size,
+      max_lines = .x
+    )
   )
-  wrap_width <- max(10, floor(if (for_pdf) 26 / facet_cols else 24 / facet_cols))
+  candidate_longest_lines <- purrr::map_dbl(candidate_labels, ~ max(purrr::map_int(.x, label_line_width), na.rm = TRUE))
+  candidate_sizes <- purrr::map_dbl(
+    candidate_longest_lines,
+    ~ min(base_strip_size, base_strip_size * target_line_chars / max(1, .x))
+  )
+  chosen_idx <- which(candidate_sizes >= min_strip_size)[1]
+  if (is.na(chosen_idx)) {
+    chosen_idx <- length(candidate_labels)
+  }
+
+  rendered_method_labels <- candidate_labels[[chosen_idx]]
+  longest_rendered_line <- candidate_longest_lines[[chosen_idx]]
+  strip_text_size <- max(
+    min_strip_size,
+    min(base_strip_size, base_strip_size * target_line_chars / max(1, longest_rendered_line))
+  )
+
+  summary_df <- summary_df %>%
+    dplyr::mutate(
+      method_display = factor(
+        rendered_method_labels[match(as.character(method), method_labels)],
+        levels = rendered_method_labels
+      )
+    )
 
   ggplot2::ggplot(
     summary_df,
     ggplot2::aes(
-      x = median_silhouette,
-      y = median_max_jaccard,
-      fill = cluster_size
+      x = .data[[x_metric]],
+      y = .data[[y_metric]],
+      fill = .data[[color_metric]]
     )
   ) +
     ggplot2::geom_point(
@@ -583,21 +709,20 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
       alpha = 1
     ) +
     ggplot2::facet_wrap(
-      ~ method,
-      scales = "fixed",
-      labeller = ggplot2::labeller(method = ggplot2::label_wrap_gen(width = wrap_width))
+      ~ method_display,
+      scales = "fixed"
     ) +
-    ggplot2::scale_x_continuous(limits = c(-1, 1)) +
-    ggplot2::scale_y_continuous(limits = c(0, 1)) +
+    ggplot2::scale_x_continuous(limits = x_spec$limits) +
+    ggplot2::scale_y_continuous(limits = y_spec$limits) +
     ggplot2::scale_fill_gradient2(
-      name = "Cluster size",
+      name = color_spec$label,
       low = "blue",
       mid = "white",
       high = "firebrick",
-      midpoint = mid_cs
+      midpoint = if (is.null(color_spec$midpoint)) stats::median(summary_df[[color_metric]], na.rm = TRUE) else color_spec$midpoint
     ) +
-    ggplot2::xlab("Median silhouette width") +
-    ggplot2::ylab(expression(paste("Cluster ", stability[Jaccard]))) +
+    ggplot2::xlab(x_spec$label) +
+    ggplot2::ylab(y_spec$label) +
     ggplot2::theme_bw(base_size = if (for_pdf) 12 else 11) +
     ggplot2::theme(
       panel.grid.minor = ggplot2::element_blank(),
@@ -605,8 +730,10 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
       strip.text = ggplot2::element_text(
         face = "bold",
         size = strip_text_size,
+        hjust = 0.5,
+        vjust = 0.5,
         lineheight = 0.95,
-        margin = ggplot2::margin(2, 1, 2, 1)
+        margin = ggplot2::margin(4, 6, 4, 6)
       ),
       legend.position = "right"
     )

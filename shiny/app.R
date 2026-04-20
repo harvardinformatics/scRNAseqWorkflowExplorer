@@ -65,6 +65,7 @@ find_method_pairs <- function(data_dir = "data") {
 infer_bootstrap_path <- function(rds_path) {
   base_no_ext <- stringr::str_replace(rds_path, "\\.rds$", "")
   candidates <- c(
+    paste0(base_no_ext, "_clusterdownsampling.tsv"),
     paste0(base_no_ext, "_bootstraps.tsv"),
     paste0(base_no_ext, "_clusterbootstraps.tsv")
   )
@@ -613,6 +614,36 @@ ui <- fluidPage(
         sidebarPanel(
           width = 4,
           helpText("For each selected method, plot per-cluster median silhouette width against per-cluster median Jaccard stability from the matching downsampling summary."),
+          selectInput(
+            "silhouette_stability_x",
+            "X-axis",
+            choices = c(
+              "Median silhouette width" = "median_silhouette",
+              "Cluster stability" = "median_max_jaccard",
+              "Cluster size" = "cluster_size"
+            ),
+            selected = "median_silhouette"
+          ),
+          selectInput(
+            "silhouette_stability_y",
+            "Y-axis",
+            choices = c(
+              "Cluster stability" = "median_max_jaccard",
+              "Median silhouette width" = "median_silhouette",
+              "Cluster size" = "cluster_size"
+            ),
+            selected = "median_max_jaccard"
+          ),
+          selectInput(
+            "silhouette_stability_color",
+            "Color ramp",
+            choices = c(
+              "Cluster size" = "cluster_size",
+              "Median silhouette width" = "median_silhouette",
+              "Cluster stability" = "median_max_jaccard"
+            ),
+            selected = "cluster_size"
+          ),
           actionButton("refresh_silhouette_stability", "Refresh method list"),
           downloadButton("download_silhouette_stability_pdf", "Download hi-res PDF")
         ),
@@ -646,6 +677,12 @@ ui <- fluidPage(
 )
 
 server <- function(input, output, session) {
+  silhouette_metric_choices <- c(
+    "Median silhouette width" = "median_silhouette",
+    "Cluster stability" = "median_max_jaccard",
+    "Cluster size" = "cluster_size"
+  )
+
   method_pairs <- reactiveVal(find_method_pairs("data"))
   seurat_object_paths <- reactiveVal(find_seurat_object_paths("data"))
   all_seurat_paths <- reactiveVal(find_seurat_object_paths("data"))
@@ -1057,13 +1094,20 @@ server <- function(input, output, session) {
     methods <- all_method_data()
 
     validate(
-      need(length(methods) > 0, "No valid method pairs found in ./data.")
+      need(length(methods) > 0, "No valid method pairs found in ./data."),
+      need(
+        length(unique(c(input$silhouette_stability_x, input$silhouette_stability_y, input$silhouette_stability_color))) == 3,
+        "Choose three different metrics for the x-axis, y-axis, and color ramp."
+      )
     )
 
     ClusterStabilityVsSilhouettePlot(
       meta_list = purrr::map(methods, "meta"),
       downsamp_list = purrr::map(methods, "bootstraps"),
-      method_labels = purrr::map_chr(methods, "label")
+      method_labels = purrr::map_chr(methods, "label"),
+      x_metric = input$silhouette_stability_x,
+      y_metric = input$silhouette_stability_y,
+      color_metric = input$silhouette_stability_color
     )
   })
 
@@ -1142,10 +1186,20 @@ server <- function(input, output, session) {
     capture_condition_message({
       methods <- all_method_data()
 
+      validate(
+        need(
+          length(unique(c(input$silhouette_stability_x, input$silhouette_stability_y, input$silhouette_stability_color))) == 3,
+          "Choose three different metrics for the x-axis, y-axis, and color ramp."
+        )
+      )
+
       ClusterStabilityVsSilhouettePlot(
         meta_list = purrr::map(methods, "meta"),
         downsamp_list = purrr::map(methods, "bootstraps"),
-        method_labels = purrr::map_chr(methods, "label")
+        method_labels = purrr::map_chr(methods, "label"),
+        x_metric = input$silhouette_stability_x,
+        y_metric = input$silhouette_stability_y,
+        color_metric = input$silhouette_stability_color
       )
     })$error
   })
@@ -1361,6 +1415,9 @@ server <- function(input, output, session) {
           meta_list = purrr::map(methods, "meta"),
           downsamp_list = purrr::map(methods, "bootstraps"),
           method_labels = purrr::map_chr(methods, "label"),
+          x_metric = input$silhouette_stability_x,
+          y_metric = input$silhouette_stability_y,
+          color_metric = input$silhouette_stability_color,
           for_pdf = TRUE
         )
       )
@@ -1615,7 +1672,13 @@ server <- function(input, output, session) {
       length(methods),
       " methods for the silhouette-vs-stability comparison, spanning ",
       cluster_total,
-      " clusters across the selected method set."
+      " clusters across the selected method set. Mapping: x = ",
+      names(silhouette_metric_choices)[match(input$silhouette_stability_x, silhouette_metric_choices)],
+      ", y = ",
+      names(silhouette_metric_choices)[match(input$silhouette_stability_y, silhouette_metric_choices)],
+      ", color = ",
+      names(silhouette_metric_choices)[match(input$silhouette_stability_color, silhouette_metric_choices)],
+      "."
     )
   })
 
