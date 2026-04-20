@@ -683,6 +683,19 @@ server <- function(input, output, session) {
     "Cluster size" = "cluster_size"
   )
 
+  normalize_min_size_input <- function(value, default = 1L) {
+    if (is.null(value) || length(value) != 1 || is.na(value) || !is.finite(value)) {
+      return(as.integer(default))
+    }
+
+    value <- suppressWarnings(as.integer(value))
+    if (is.na(value) || value < 1) {
+      return(as.integer(default))
+    }
+
+    value
+  }
+
   method_pairs <- reactiveVal(find_method_pairs("data"))
   seurat_object_paths <- reactiveVal(find_seurat_object_paths("data"))
   all_seurat_paths <- reactiveVal(find_seurat_object_paths("data"))
@@ -704,6 +717,10 @@ server <- function(input, output, session) {
 
   workflows_confirmed <- reactive({
     isTRUE(input$workflow_generated_data)
+  })
+
+  upset_min_size_value <- reactive({
+    normalize_min_size_input(input$upset_min_size, default = 1L)
   })
 
   capture_condition_message <- function(expr) {
@@ -1219,7 +1236,7 @@ server <- function(input, output, session) {
           purrr::map_chr(seurat_object_paths(), ~ resolve_method_label(label_map, .x)),
           sep = "_"
         ),
-        min_size = if (is.null(input$upset_min_size)) 1 else input$upset_min_size
+        min_size = upset_min_size_value()
       )
     })$error
   })
@@ -1342,7 +1359,7 @@ server <- function(input, output, session) {
         purrr::map_chr(seurat_object_paths(), ~ resolve_method_label(label_map, .x)),
         sep = "_"
       ),
-      min_size = if (is.null(input$upset_min_size)) 1 else input$upset_min_size
+      min_size = upset_min_size_value()
     )
   }, res = 110)
 
@@ -1395,7 +1412,7 @@ server <- function(input, output, session) {
           purrr::map_chr(seurat_object_paths(), ~ resolve_method_label(label_map, .x)),
           sep = "_"
         ),
-        min_size = if (is.null(input$upset_min_size)) 1 else input$upset_min_size,
+        min_size = upset_min_size_value(),
         for_pdf = TRUE
       ))
     }
