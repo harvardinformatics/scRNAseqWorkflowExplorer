@@ -512,8 +512,8 @@ ui <- fluidPage(
               )
             )
           ),
-          selectInput("method1", "Method 1", choices = NULL),
-          selectInput("method2", "Method 2", choices = NULL),
+          selectInput("method1", "Method 1", choices = c("Choose a method" = "")),
+          selectInput("method2", "Method 2", choices = c("Choose a method" = "")),
           numericInput("threshold", "Minimum Jaccard threshold", value = 0.6, min = 0, max = 1, step = 0.01),
           actionButton("refresh", "Refresh file list"),
           downloadButton("download_stability_pdf", "Download hi-res PDF")
@@ -605,6 +605,25 @@ ui <- fluidPage(
           uiOutput("jaccard_error"),
           plotOutput("jaccard_heatmap", height = "620px"),
           verbatimTextOutput("jaccard_status")
+        )
+      )
+    ),
+    tabPanel(
+      "Silhouette width biplot",
+      sidebarLayout(
+        sidebarPanel(
+          width = 4,
+          helpText("Pick two methods and compare cell-level silhouette widths. If a barcode is absent from one method, its silhouette width is set to -1 for that axis."),
+          selectInput("silhouette_biplot_method1", "Method 1", choices = NULL),
+          selectInput("silhouette_biplot_method2", "Method 2", choices = NULL),
+          actionButton("refresh_silhouette_biplot", "Refresh method list"),
+          downloadButton("download_silhouette_biplot_pdf", "Download hi-res PDF")
+        ),
+        mainPanel(
+          width = 8,
+          uiOutput("silhouette_biplot_error"),
+          plotOutput("silhouette_biplot_plot", height = "620px"),
+          verbatimTextOutput("silhouette_biplot_status")
         )
       )
     ),
@@ -723,6 +742,23 @@ server <- function(input, output, session) {
     normalize_min_size_input(input$upset_min_size, default = 1L)
   })
 
+  silhouette_stability_metrics <- reactive({
+    defaults <- c(
+      x = "median_silhouette",
+      y = "median_max_jaccard",
+      color = "cluster_size"
+    )
+
+    values <- c(
+      x = input$silhouette_stability_x,
+      y = input$silhouette_stability_y,
+      color = input$silhouette_stability_color
+    )
+
+    values[is.null(values) | is.na(values) | !nzchar(values)] <- defaults[is.null(values) | is.na(values) | !nzchar(values)]
+    values
+  })
+
   capture_condition_message <- function(expr) {
     tryCatch(
       list(result = force(expr), error = NULL),
@@ -760,33 +796,44 @@ server <- function(input, output, session) {
         sep = " "
       )
       choice_map <- stats::setNames(pairs$rds, display_labels)
+      choice_map_with_blank <- c("Choose a method" = "", choice_map)
 
       current_method1 <- isolate(input$method1)
       current_method2 <- isolate(input$method2)
-      selected_method1 <- if (!is.null(current_method1) && current_method1 %in% pairs$rds) current_method1 else pairs$rds[[1]]
-      fallback_method2 <- if (nrow(pairs) >= 2) pairs$rds[[2]] else pairs$rds[[1]]
-      selected_method2 <- if (!is.null(current_method2) && current_method2 %in% pairs$rds) current_method2 else fallback_method2
-      if (identical(selected_method1, selected_method2) && nrow(pairs) >= 2) {
-        selected_method2 <- pairs$rds[[which(pairs$rds != selected_method1)[1]]]
-      }
+      selected_method1 <- if (!is.null(current_method1) && current_method1 %in% pairs$rds) current_method1 else ""
+      selected_method2 <- if (!is.null(current_method2) && current_method2 %in% pairs$rds) current_method2 else ""
 
       current_jaccard_method1 <- isolate(input$jaccard_method1)
       current_jaccard_method2 <- isolate(input$jaccard_method2)
-      selected_jaccard_method1 <- if (!is.null(current_jaccard_method1) && current_jaccard_method1 %in% pairs$rds) current_jaccard_method1 else selected_method1
-      selected_jaccard_method2 <- if (!is.null(current_jaccard_method2) && current_jaccard_method2 %in% pairs$rds) current_jaccard_method2 else selected_method2
+      selected_jaccard_method1 <- if (!is.null(current_jaccard_method1) && current_jaccard_method1 %in% pairs$rds) current_jaccard_method1 else pairs$rds[[1]]
+      fallback_jaccard_method2 <- if (nrow(pairs) >= 2) pairs$rds[[2]] else pairs$rds[[1]]
+      selected_jaccard_method2 <- if (!is.null(current_jaccard_method2) && current_jaccard_method2 %in% pairs$rds) current_jaccard_method2 else fallback_jaccard_method2
       if (identical(selected_jaccard_method1, selected_jaccard_method2) && nrow(pairs) >= 2) {
         selected_jaccard_method2 <- pairs$rds[[which(pairs$rds != selected_jaccard_method1)[1]]]
       }
 
-      updateSelectInput(session, "method1", choices = choice_map, selected = selected_method1)
-      updateSelectInput(session, "method2", choices = choice_map, selected = selected_method2)
+      current_silhouette_biplot_method1 <- isolate(input$silhouette_biplot_method1)
+      current_silhouette_biplot_method2 <- isolate(input$silhouette_biplot_method2)
+      selected_silhouette_biplot_method1 <- if (!is.null(current_silhouette_biplot_method1) && current_silhouette_biplot_method1 %in% pairs$rds) current_silhouette_biplot_method1 else pairs$rds[[1]]
+      fallback_silhouette_biplot_method2 <- if (nrow(pairs) >= 2) pairs$rds[[2]] else pairs$rds[[1]]
+      selected_silhouette_biplot_method2 <- if (!is.null(current_silhouette_biplot_method2) && current_silhouette_biplot_method2 %in% pairs$rds) current_silhouette_biplot_method2 else fallback_silhouette_biplot_method2
+      if (identical(selected_silhouette_biplot_method1, selected_silhouette_biplot_method2) && nrow(pairs) >= 2) {
+        selected_silhouette_biplot_method2 <- pairs$rds[[which(pairs$rds != selected_silhouette_biplot_method1)[1]]]
+      }
+
+      updateSelectInput(session, "method1", choices = choice_map_with_blank, selected = selected_method1)
+      updateSelectInput(session, "method2", choices = choice_map_with_blank, selected = selected_method2)
       updateSelectInput(session, "jaccard_method1", choices = choice_map, selected = selected_jaccard_method1)
       updateSelectInput(session, "jaccard_method2", choices = choice_map, selected = selected_jaccard_method2)
+      updateSelectInput(session, "silhouette_biplot_method1", choices = choice_map, selected = selected_silhouette_biplot_method1)
+      updateSelectInput(session, "silhouette_biplot_method2", choices = choice_map, selected = selected_silhouette_biplot_method2)
     } else {
-      updateSelectInput(session, "method1", choices = c())
-      updateSelectInput(session, "method2", choices = c())
+      updateSelectInput(session, "method1", choices = c("Choose a method" = ""), selected = "")
+      updateSelectInput(session, "method2", choices = c("Choose a method" = ""), selected = "")
       updateSelectInput(session, "jaccard_method1", choices = c())
       updateSelectInput(session, "jaccard_method2", choices = c())
+      updateSelectInput(session, "silhouette_biplot_method1", choices = c())
+      updateSelectInput(session, "silhouette_biplot_method2", choices = c())
     }
   }
 
@@ -825,6 +872,7 @@ server <- function(input, output, session) {
 
   observeEvent(input$refresh, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_jaccard, refresh_choices(), ignoreInit = TRUE)
+  observeEvent(input$refresh_silhouette_biplot, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_silhouette_stability, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_config, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_upset, refresh_choices(), ignoreInit = TRUE)
@@ -987,6 +1035,21 @@ server <- function(input, output, session) {
     )
   })
 
+  loaded_silhouette_biplot_data <- reactive({
+    req(input$silhouette_biplot_method1, input$silhouette_biplot_method2)
+
+    validate(
+      need(input$silhouette_biplot_method1 != input$silhouette_biplot_method2, "Pick two different methods."),
+      need(file.exists(input$silhouette_biplot_method1), "Method 1 file does not exist."),
+      need(file.exists(input$silhouette_biplot_method2), "Method 2 file does not exist.")
+    )
+
+    list(
+      meta1 = read_seurat_meta(input$silhouette_biplot_method1),
+      meta2 = read_seurat_meta(input$silhouette_biplot_method2)
+    )
+  })
+
   all_method_data <- reactive({
     pairs <- method_pairs()
     label_map <- method_labels()
@@ -1022,10 +1085,12 @@ server <- function(input, output, session) {
     label_map <- method_labels()
 
     if (nrow(pairs) == 0) {
-      updateSelectInput(session, "method1", choices = c())
-      updateSelectInput(session, "method2", choices = c())
+      updateSelectInput(session, "method1", choices = c("Choose a method" = ""), selected = "")
+      updateSelectInput(session, "method2", choices = c("Choose a method" = ""), selected = "")
       updateSelectInput(session, "jaccard_method1", choices = c())
       updateSelectInput(session, "jaccard_method2", choices = c())
+      updateSelectInput(session, "silhouette_biplot_method1", choices = c())
+      updateSelectInput(session, "silhouette_biplot_method2", choices = c())
       return()
     }
 
@@ -1037,10 +1102,12 @@ server <- function(input, output, session) {
       )
     )
 
-    updateSelectInput(session, "method1", choices = choice_map, selected = isolate(input$method1))
-    updateSelectInput(session, "method2", choices = choice_map, selected = isolate(input$method2))
+    updateSelectInput(session, "method1", choices = c("Choose a method" = "", choice_map), selected = isolate(input$method1))
+    updateSelectInput(session, "method2", choices = c("Choose a method" = "", choice_map), selected = isolate(input$method2))
     updateSelectInput(session, "jaccard_method1", choices = choice_map, selected = isolate(input$jaccard_method1))
     updateSelectInput(session, "jaccard_method2", choices = choice_map, selected = isolate(input$jaccard_method2))
+    updateSelectInput(session, "silhouette_biplot_method1", choices = choice_map, selected = isolate(input$silhouette_biplot_method1))
+    updateSelectInput(session, "silhouette_biplot_method2", choices = choice_map, selected = isolate(input$silhouette_biplot_method2))
   })
 
   output$gene_symbol_datalist <- renderUI({
@@ -1109,27 +1176,25 @@ server <- function(input, output, session) {
 
   silhouette_stability_plot_obj <- reactive({
     methods <- all_method_data()
+    metrics <- silhouette_stability_metrics()
 
     validate(
       need(length(methods) > 0, "No valid method pairs found in ./data."),
-      need(
-        length(unique(c(input$silhouette_stability_x, input$silhouette_stability_y, input$silhouette_stability_color))) == 3,
-        "Choose three different metrics for the x-axis, y-axis, and color ramp."
-      )
+      need(length(unique(unname(metrics))) == 3, "Choose three different metrics for the x-axis, y-axis, and color ramp.")
     )
 
     ClusterStabilityVsSilhouettePlot(
       meta_list = purrr::map(methods, "meta"),
       downsamp_list = purrr::map(methods, "bootstraps"),
       method_labels = purrr::map_chr(methods, "label"),
-      x_metric = input$silhouette_stability_x,
-      y_metric = input$silhouette_stability_y,
-      color_metric = input$silhouette_stability_color
+      x_metric = metrics[["x"]],
+      y_metric = metrics[["y"]],
+      color_metric = metrics[["color"]]
     )
   })
 
   stability_error_message <- reactive({
-    if (workflows_confirmed() || !identical(input$analysis_tabs, "Cluster stability")) {
+    if (workflows_confirmed() || !identical(input$analysis_tabs, "Inter vs. intra-cluster stability")) {
       return(NULL)
     }
 
@@ -1195,28 +1260,46 @@ server <- function(input, output, session) {
     })$error
   })
 
+  silhouette_biplot_error_message <- reactive({
+    if (workflows_confirmed() || !identical(input$analysis_tabs, "Silhouette width biplot")) {
+      return(NULL)
+    }
+
+    capture_condition_message({
+      dat <- loaded_silhouette_biplot_data()
+      label_map <- method_labels()
+      label1 <- resolve_method_label(label_map, input$silhouette_biplot_method1)
+      label2 <- resolve_method_label(label_map, input$silhouette_biplot_method2)
+
+      silhouette_width_biplot(
+        meta1 = dat$meta1,
+        meta2 = dat$meta2,
+        name1 = label1,
+        name2 = label2
+      )
+    })$error
+  })
+
   silhouette_stability_error_message <- reactive({
-    if (workflows_confirmed() || !identical(input$analysis_tabs, "Silhouette vs stability")) {
+    if (workflows_confirmed() || !identical(input$analysis_tabs, "Cluster stability, silhouette width, and size")) {
       return(NULL)
     }
 
     capture_condition_message({
       methods <- all_method_data()
+      metrics <- silhouette_stability_metrics()
 
       validate(
-        need(
-          length(unique(c(input$silhouette_stability_x, input$silhouette_stability_y, input$silhouette_stability_color))) == 3,
-          "Choose three different metrics for the x-axis, y-axis, and color ramp."
-        )
+        need(length(unique(unname(metrics))) == 3, "Choose three different metrics for the x-axis, y-axis, and color ramp.")
       )
 
       ClusterStabilityVsSilhouettePlot(
         meta_list = purrr::map(methods, "meta"),
         downsamp_list = purrr::map(methods, "bootstraps"),
         method_labels = purrr::map_chr(methods, "label"),
-        x_metric = input$silhouette_stability_x,
-        y_metric = input$silhouette_stability_y,
-        color_metric = input$silhouette_stability_color
+        x_metric = metrics[["x"]],
+        y_metric = metrics[["y"]],
+        color_metric = metrics[["color"]]
       )
     })$error
   })
@@ -1251,6 +1334,10 @@ server <- function(input, output, session) {
 
   output$jaccard_error <- renderUI({
     render_tab_error_box(jaccard_error_message())
+  })
+
+  output$silhouette_biplot_error <- renderUI({
+    render_tab_error_box(silhouette_biplot_error_message())
   })
 
   output$silhouette_stability_error <- renderUI({
@@ -1344,6 +1431,21 @@ server <- function(input, output, session) {
     )
   }, res = 110)
 
+  output$silhouette_biplot_plot <- renderPlot({
+    req(is.null(silhouette_biplot_error_message()))
+    dat <- loaded_silhouette_biplot_data()
+    label_map <- method_labels()
+    label1 <- resolve_method_label(label_map, input$silhouette_biplot_method1)
+    label2 <- resolve_method_label(label_map, input$silhouette_biplot_method2)
+
+    silhouette_width_biplot(
+      meta1 = dat$meta1,
+      meta2 = dat$meta2,
+      name1 = label1,
+      name2 = label2
+    )
+  }, res = 110)
+
   output$silhouette_stability_plot <- renderPlot({
     req(is.null(silhouette_stability_error_message()))
     silhouette_stability_plot_obj()
@@ -1418,12 +1520,42 @@ server <- function(input, output, session) {
     }
   )
 
+  output$download_silhouette_biplot_pdf <- downloadHandler(
+    filename = function() {
+      label_map <- method_labels()
+      paste0(
+        "silhouette-width-biplot-",
+        gsub("[^A-Za-z0-9_-]+", "-", resolve_method_label(label_map, input$silhouette_biplot_method1)),
+        "-vs-",
+        gsub("[^A-Za-z0-9_-]+", "-", resolve_method_label(label_map, input$silhouette_biplot_method2)),
+        ".pdf"
+      )
+    },
+    content = function(file) {
+      dat <- loaded_silhouette_biplot_data()
+      label_map <- method_labels()
+      label1 <- resolve_method_label(label_map, input$silhouette_biplot_method1)
+      label2 <- resolve_method_label(label_map, input$silhouette_biplot_method2)
+
+      grDevices::pdf(file, width = 8.5, height = 7.5, onefile = TRUE)
+      on.exit(grDevices::dev.off(), add = TRUE)
+      print(silhouette_width_biplot(
+        meta1 = dat$meta1,
+        meta2 = dat$meta2,
+        name1 = label1,
+        name2 = label2,
+        for_pdf = TRUE
+      ))
+    }
+  )
+
   output$download_silhouette_stability_pdf <- downloadHandler(
     filename = function() {
       paste0("cluster-silhouette-vs-stability-", format(Sys.Date(), "%Y%m%d"), ".pdf")
     },
     content = function(file) {
       methods <- all_method_data()
+      metrics <- silhouette_stability_metrics()
 
       grDevices::pdf(file, width = 10, height = 7, onefile = TRUE)
       on.exit(grDevices::dev.off(), add = TRUE)
@@ -1432,9 +1564,9 @@ server <- function(input, output, session) {
           meta_list = purrr::map(methods, "meta"),
           downsamp_list = purrr::map(methods, "bootstraps"),
           method_labels = purrr::map_chr(methods, "label"),
-          x_metric = input$silhouette_stability_x,
-          y_metric = input$silhouette_stability_y,
-          color_metric = input$silhouette_stability_color,
+          x_metric = metrics[["x"]],
+          y_metric = metrics[["y"]],
+          color_metric = metrics[["color"]],
           for_pdf = TRUE
         )
       )
@@ -1679,6 +1811,7 @@ server <- function(input, output, session) {
     }
 
     methods <- if (workflows_confirmed()) all_method_data() else all_method_data_safe()$result
+    metrics <- silhouette_stability_metrics()
     cluster_total <- methods %>%
       purrr::map("meta") %>%
       purrr::map_int(~ dplyr::n_distinct(.x$seurat_clusters)) %>%
@@ -1690,12 +1823,37 @@ server <- function(input, output, session) {
       " methods for the silhouette-vs-stability comparison, spanning ",
       cluster_total,
       " clusters across the selected method set. Mapping: x = ",
-      names(silhouette_metric_choices)[match(input$silhouette_stability_x, silhouette_metric_choices)],
+      names(silhouette_metric_choices)[match(metrics[["x"]], silhouette_metric_choices)],
       ", y = ",
-      names(silhouette_metric_choices)[match(input$silhouette_stability_y, silhouette_metric_choices)],
+      names(silhouette_metric_choices)[match(metrics[["y"]], silhouette_metric_choices)],
       ", color = ",
-      names(silhouette_metric_choices)[match(input$silhouette_stability_color, silhouette_metric_choices)],
+      names(silhouette_metric_choices)[match(metrics[["color"]], silhouette_metric_choices)],
       "."
+    )
+  })
+
+  output$silhouette_biplot_status <- renderText({
+    if (!workflows_confirmed() && !is.null(silhouette_biplot_error_message())) {
+      return(paste0("Full error message:\n", silhouette_biplot_error_message()))
+    }
+
+    dat <- loaded_silhouette_biplot_data()
+    label_map <- method_labels()
+    label1 <- resolve_method_label(label_map, input$silhouette_biplot_method1)
+    label2 <- resolve_method_label(label_map, input$silhouette_biplot_method2)
+    shared_barcodes <- length(intersect(rownames(dat$meta1), rownames(dat$meta2)))
+    union_barcodes <- length(union(rownames(dat$meta1), rownames(dat$meta2)))
+
+    paste0(
+      "Comparing cell-level silhouette widths for ",
+      label1,
+      " vs ",
+      label2,
+      ". Shared barcodes: ",
+      shared_barcodes,
+      " of ",
+      union_barcodes,
+      " total in the union. Missing-barcode values are plotted at -1."
     )
   })
 

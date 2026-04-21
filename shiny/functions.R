@@ -476,6 +476,96 @@ MakeInterVsIntraStablePlot <- function(meta1, meta2,
     )
 }
 
+silhouette_width_biplot <- function(meta1, meta2, name1, name2, for_pdf = FALSE) {
+  required_meta_cols <- "silhouette_width"
+  missing_meta1 <- setdiff(required_meta_cols, names(meta1))
+  missing_meta2 <- setdiff(required_meta_cols, names(meta2))
+
+  if (length(missing_meta1) > 0) {
+    stop("Metadata for method `", name1, "` is missing required column `silhouette_width`.")
+  }
+
+  if (length(missing_meta2) > 0) {
+    stop("Metadata for method `", name2, "` is missing required column `silhouette_width`.")
+  }
+
+  sil1 <- tibble::tibble(
+    barcode = rownames(meta1),
+    silhouette_1 = as.numeric(meta1$silhouette_width)
+  )
+
+  sil2 <- tibble::tibble(
+    barcode = rownames(meta2),
+    silhouette_2 = as.numeric(meta2$silhouette_width)
+  )
+
+  plot_df <- dplyr::full_join(sil1, sil2, by = "barcode") %>%
+    dplyr::mutate(
+      barcode_status = dplyr::case_when(
+        !is.na(silhouette_1) & !is.na(silhouette_2) ~ "Shared barcode",
+        !is.na(silhouette_1) & is.na(silhouette_2) ~ "Missing from one method",
+        is.na(silhouette_1) & !is.na(silhouette_2) ~ "Missing from one method",
+        TRUE ~ "Missing in both"
+      ),
+      silhouette_1 = dplyr::if_else(is.na(silhouette_1), -1, silhouette_1),
+      silhouette_2 = dplyr::if_else(is.na(silhouette_2), -1, silhouette_2)
+    ) %>%
+    dplyr::filter(.data$barcode_status != "Missing in both")
+
+  if (nrow(plot_df) == 0) {
+    stop("No cell barcodes were available for the selected methods.")
+  }
+
+  status_levels <- c("Shared barcode", "Missing from one method")
+  palette_values <- c(
+    "Shared barcode" = "#1f78b4",
+    "Missing from one method" = "grey60"
+  )
+
+  point_size <- if (for_pdf) 0.9 else 0.8
+  alpha_value <- if (for_pdf) 0.22 else 0.18
+
+  ggplot2::ggplot(
+    plot_df,
+    ggplot2::aes(
+      x = silhouette_1,
+      y = silhouette_2,
+      color = factor(barcode_status, levels = status_levels)
+    )
+  ) +
+    ggplot2::geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey55", linewidth = 0.5) +
+    ggplot2::geom_vline(xintercept = -1, linetype = "dotted", color = "grey70", linewidth = 0.4) +
+    ggplot2::geom_hline(yintercept = -1, linetype = "dotted", color = "grey70", linewidth = 0.4) +
+    ggplot2::geom_point(size = point_size, alpha = alpha_value) +
+    ggplot2::coord_equal(xlim = c(-1, 1), ylim = c(-1, 1), expand = TRUE) +
+    ggplot2::scale_color_manual(values = palette_values, drop = FALSE, name = NULL) +
+    ggplot2::labs(
+      title = "Cell-level silhouette width biplot",
+      subtitle = paste0(scales::comma(nrow(plot_df)), " cell barcodes across two methods"),
+      x = name1,
+      y = name2
+    ) +
+    ggplot2::theme_bw(base_size = if (for_pdf) 12 else 11) +
+    ggplot2::theme(
+      panel.grid.minor = ggplot2::element_blank(),
+      plot.title = ggplot2::element_text(face = "bold"),
+      legend.position = "bottom",
+      legend.direction = "horizontal",
+      legend.box = "horizontal",
+      legend.text = ggplot2::element_text(size = if (for_pdf) 10 else 9),
+      axis.title.x = ggplot2::element_text(margin = ggplot2::margin(t = 8)),
+      axis.title.y = ggplot2::element_text(margin = ggplot2::margin(r = 8)),
+      plot.margin = ggplot2::margin(8, 10, 8, 8)
+    ) +
+    ggplot2::guides(
+      color = ggplot2::guide_legend(
+        nrow = 1,
+        byrow = TRUE,
+        override.aes = list(size = if (for_pdf) 2.8 else 2.4, alpha = 0.9)
+      )
+    )
+}
+
 ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_labels,
                                              x_metric = "median_silhouette",
                                              y_metric = "median_max_jaccard",
