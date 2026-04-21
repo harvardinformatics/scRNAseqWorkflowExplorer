@@ -533,10 +533,10 @@ silhouette_width_biplot <- function(meta1, meta2, name1, name2, for_pdf = FALSE)
       color = factor(barcode_status, levels = status_levels)
     )
   ) +
-    ggplot2::geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey55", linewidth = 0.5) +
     ggplot2::geom_vline(xintercept = -1, linetype = "dotted", color = "grey70", linewidth = 0.4) +
     ggplot2::geom_hline(yintercept = -1, linetype = "dotted", color = "grey70", linewidth = 0.4) +
     ggplot2::geom_point(size = point_size, alpha = alpha_value) +
+    ggplot2::geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey55", linewidth = 0.5) +
     ggplot2::coord_equal(xlim = c(-1, 1), ylim = c(-1, 1), expand = TRUE) +
     ggplot2::scale_color_manual(values = palette_values, drop = FALSE, name = NULL) +
     ggplot2::labs(
@@ -564,6 +564,135 @@ silhouette_width_biplot <- function(meta1, meta2, name1, name2, for_pdf = FALSE)
         override.aes = list(size = if (for_pdf) 2.8 else 2.4, alpha = 0.9)
       )
     )
+}
+
+build_silhouette_nj_tree <- function(meta_list, method_names, bootstrap = FALSE, n_boot = 100) {
+  if (!is.list(meta_list) || length(meta_list) < 2) {
+    stop("Provide at least two metadata tables to build a silhouette-width NJ tree.")
+  }
+
+  if (length(meta_list) != length(method_names)) {
+    stop("`meta_list` and `method_names` must have the same length.")
+  }
+
+  if (length(unique(method_names)) != length(method_names)) {
+    stop("`method_names` must be unique.")
+  }
+
+  if (!is.logical(bootstrap) || length(bootstrap) != 1 || is.na(bootstrap)) {
+    stop("`bootstrap` must be TRUE or FALSE.")
+  }
+
+  if (!is.numeric(n_boot) || length(n_boot) != 1 || is.na(n_boot) || n_boot < 1) {
+    stop("`n_boot` must be a single number greater than or equal to 1.")
+  }
+
+  n_boot <- as.integer(n_boot)
+
+  missing_cols <- purrr::map_lgl(meta_list, ~ !("silhouette_width" %in% names(.x)))
+  if (any(missing_cols)) {
+    stop(
+      "These methods are missing `silhouette_width` in metadata: ",
+      paste(method_names[missing_cols], collapse = ", ")
+    )
+  }
+
+  barcode_sets <- purrr::map(meta_list, rownames)
+  shared_barcodes <- Reduce(intersect, barcode_sets)
+
+  if (length(shared_barcodes) == 0) {
+    stop("No shared barcodes were found across the selected methods.")
+  }
+
+  silhouette_mat <- vapply(meta_list, function(meta_tbl) {
+    values <- as.numeric(meta_tbl[shared_barcodes, "silhouette_width", drop = TRUE])
+    values
+  }, numeric(length(shared_barcodes)))
+
+  if (is.null(dim(silhouette_mat))) {
+    silhouette_mat <- matrix(silhouette_mat, ncol = length(meta_list))
+  }
+
+  colnames(silhouette_mat) <- method_names
+  rownames(silhouette_mat) <- shared_barcodes
+
+  complete_rows <- stats::complete.cases(silhouette_mat)
+  silhouette_mat <- silhouette_mat[complete_rows, , drop = FALSE]
+
+  if (nrow(silhouette_mat) == 0) {
+    stop("No shared barcodes had non-missing silhouette widths across all selected methods.")
+  }
+
+  rmsd <- function(x, y) {
+    sqrt(mean((x - y)^2))
+  }
+
+  build_dist_from_matrix <- function(value_mat) {
+    n_methods <- ncol(value_mat)
+    dist_mat <- matrix(
+      0,
+      nrow = n_methods,
+      ncol = n_methods,
+      dimnames = list(method_names, method_names)
+    )
+
+    for (i in seq_len(n_methods)) {
+      for (j in seq_len(i - 1)) {
+        d <- rmsd(value_mat[, i], value_mat[, j])
+        dist_mat[i, j] <- d
+        dist_mat[j, i] <- d
+      }
+    }
+
+    stats::as.dist(dist_mat)
+  }
+
+  dist_obj <- build_dist_from_matrix(silhouette_mat)
+  nj_tree <- ape::nj(dist_obj)
+
+  bootstrap_support <- NULL
+  bootstrap_trees <- NULL
+  if (bootstrap) {
+    bootstrap_trees <- replicate(n_boot, {
+      sampled_idx <- sample(seq_len(nrow(silhouette_mat)), size = nrow(silhouette_mat), replace = TRUE)
+      sampled_mat <- silhouette_mat[sampled_idx, , drop = FALSE]
+      ape::nj(build_dist_from_matrix(sampled_mat))
+    }, simplify = FALSE)
+
+    bootstrap_support <- ape::prop.clades(nj_tree, bootstrap_trees) / n_boot * 100
+  }
+
+  list(
+    dist_matrix = dist_obj,
+    nj_tree = nj_tree,
+    bootstrap = bootstrap,
+    n_boot = if (bootstrap) n_boot else 0L,
+    bootstrap_support = bootstrap_support,
+    bootstrap_trees = bootstrap_trees,
+    shared_barcodes = shared_barcodes,
+    shared_barcodes_used = rownames(silhouette_mat),
+    dropped_shared_barcodes = setdiff(shared_barcodes, rownames(silhouette_mat))
+  )
+}
+
+plot_silhouette_nj_tree <- function(nj_tree, bootstrap_support = NULL, for_pdf = FALSE) {
+  ape::plot.phylo(
+    nj_tree,
+    main = "Neighbor-joining tree from silhouette width RMSD",
+    cex = if (for_pdf) 0.78 else 0.72,
+    font = 2,
+    no.margin = FALSE
+  )
+
+  if (!is.null(bootstrap_support)) {
+    ape::nodelabels(
+      text = sprintf("%d", round(bootstrap_support)),
+      frame = "none",
+      adj = c(1.15, -0.2),
+      cex = if (for_pdf) 0.85 else 0.75,
+      col = "black"
+    )
+  }
 }
 
 ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_labels,
