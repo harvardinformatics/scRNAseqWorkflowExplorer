@@ -91,6 +91,40 @@ read_seurat_meta <- function(rds_path) {
   obj@meta.data
 }
 
+read_seurat_cluster_meta <- function(rds_path) {
+  obj <- readRDS(rds_path)
+
+  if (!inherits(obj, "Seurat")) {
+    stop("RDS is not a Seurat object: ", basename(rds_path))
+  }
+
+  if (!("seurat_clusters" %in% colnames(obj@meta.data))) {
+    stop("Missing `seurat_clusters` in Seurat metadata: ", basename(rds_path))
+  }
+
+  meta <- obj@meta.data[, "seurat_clusters", drop = FALSE]
+  rownames(meta) <- rownames(obj@meta.data)
+  rm(obj)
+  meta
+}
+
+read_seurat_silhouette_meta <- function(rds_path) {
+  obj <- readRDS(rds_path)
+
+  if (!inherits(obj, "Seurat")) {
+    stop("RDS is not a Seurat object: ", basename(rds_path))
+  }
+
+  if (!("silhouette_width" %in% colnames(obj@meta.data))) {
+    stop("Missing `silhouette_width` in Seurat metadata: ", basename(rds_path))
+  }
+
+  meta <- obj@meta.data[, "silhouette_width", drop = FALSE]
+  rownames(meta) <- rownames(obj@meta.data)
+  rm(obj)
+  meta
+}
+
 read_bootstrap_tsv <- function(tsv_path) {
   readr::read_tsv(tsv_path, show_col_types = FALSE) %>%
     standardize_bootstrap_cols()
@@ -854,19 +888,15 @@ server <- function(input, output, session) {
 
       current_silhouette_biplot_method1 <- isolate(input$silhouette_biplot_method1)
       current_silhouette_biplot_method2 <- isolate(input$silhouette_biplot_method2)
-      selected_silhouette_biplot_method1 <- if (!is.null(current_silhouette_biplot_method1) && current_silhouette_biplot_method1 %in% pairs$rds) current_silhouette_biplot_method1 else pairs$rds[[1]]
-      fallback_silhouette_biplot_method2 <- if (nrow(pairs) >= 2) pairs$rds[[2]] else pairs$rds[[1]]
-      selected_silhouette_biplot_method2 <- if (!is.null(current_silhouette_biplot_method2) && current_silhouette_biplot_method2 %in% pairs$rds) current_silhouette_biplot_method2 else fallback_silhouette_biplot_method2
-      if (identical(selected_silhouette_biplot_method1, selected_silhouette_biplot_method2) && nrow(pairs) >= 2) {
-        selected_silhouette_biplot_method2 <- pairs$rds[[which(pairs$rds != selected_silhouette_biplot_method1)[1]]]
-      }
+      selected_silhouette_biplot_method1 <- if (!is.null(current_silhouette_biplot_method1) && current_silhouette_biplot_method1 %in% pairs$rds) current_silhouette_biplot_method1 else ""
+      selected_silhouette_biplot_method2 <- if (!is.null(current_silhouette_biplot_method2) && current_silhouette_biplot_method2 %in% pairs$rds) current_silhouette_biplot_method2 else ""
 
       updateSelectInput(session, "method1", choices = choice_map_with_blank, selected = selected_method1)
       updateSelectInput(session, "method2", choices = choice_map_with_blank, selected = selected_method2)
       updateSelectInput(session, "jaccard_method1", choices = choice_map, selected = selected_jaccard_method1)
       updateSelectInput(session, "jaccard_method2", choices = choice_map, selected = selected_jaccard_method2)
-      updateSelectInput(session, "silhouette_biplot_method1", choices = choice_map, selected = selected_silhouette_biplot_method1)
-      updateSelectInput(session, "silhouette_biplot_method2", choices = choice_map, selected = selected_silhouette_biplot_method2)
+      updateSelectInput(session, "silhouette_biplot_method1", choices = choice_map_with_blank, selected = selected_silhouette_biplot_method1)
+      updateSelectInput(session, "silhouette_biplot_method2", choices = choice_map_with_blank, selected = selected_silhouette_biplot_method2)
     } else {
       updateSelectInput(session, "method1", choices = c("Choose a method" = ""), selected = "")
       updateSelectInput(session, "method2", choices = c("Choose a method" = ""), selected = "")
@@ -1042,8 +1072,8 @@ server <- function(input, output, session) {
     )
 
     list(
-      meta1 = read_seurat_meta(input$method1),
-      meta2 = read_seurat_meta(input$method2),
+      meta1 = read_seurat_cluster_meta(input$method1),
+      meta2 = read_seurat_cluster_meta(input$method2),
       b1 = read_bootstrap_tsv(boot1),
       b2 = read_bootstrap_tsv(boot2)
     )
@@ -1069,8 +1099,8 @@ server <- function(input, output, session) {
     )
 
     list(
-      meta1 = read_seurat_meta(input$jaccard_method1),
-      meta2 = read_seurat_meta(input$jaccard_method2),
+      meta1 = read_seurat_cluster_meta(input$jaccard_method1),
+      meta2 = read_seurat_cluster_meta(input$jaccard_method2),
       l1 = stringr::str_remove(basename(input$jaccard_method1), "\\.rds$"),
       l2 = stringr::str_remove(basename(input$jaccard_method2), "\\.rds$")
     )
@@ -1086,8 +1116,8 @@ server <- function(input, output, session) {
     )
 
     list(
-      meta1 = read_seurat_meta(input$silhouette_biplot_method1),
-      meta2 = read_seurat_meta(input$silhouette_biplot_method2)
+      meta1 = read_seurat_silhouette_meta(input$silhouette_biplot_method1),
+      meta2 = read_seurat_silhouette_meta(input$silhouette_biplot_method2)
     )
   })
 
@@ -1156,8 +1186,8 @@ server <- function(input, output, session) {
       updateSelectInput(session, "method2", choices = c("Choose a method" = ""), selected = "")
       updateSelectInput(session, "jaccard_method1", choices = c())
       updateSelectInput(session, "jaccard_method2", choices = c())
-      updateSelectInput(session, "silhouette_biplot_method1", choices = c())
-      updateSelectInput(session, "silhouette_biplot_method2", choices = c())
+      updateSelectInput(session, "silhouette_biplot_method1", choices = c("Choose a method" = ""), selected = "")
+      updateSelectInput(session, "silhouette_biplot_method2", choices = c("Choose a method" = ""), selected = "")
       return()
     }
 
@@ -1173,8 +1203,8 @@ server <- function(input, output, session) {
     updateSelectInput(session, "method2", choices = c("Choose a method" = "", choice_map), selected = isolate(input$method2))
     updateSelectInput(session, "jaccard_method1", choices = choice_map, selected = isolate(input$jaccard_method1))
     updateSelectInput(session, "jaccard_method2", choices = choice_map, selected = isolate(input$jaccard_method2))
-    updateSelectInput(session, "silhouette_biplot_method1", choices = choice_map, selected = isolate(input$silhouette_biplot_method1))
-    updateSelectInput(session, "silhouette_biplot_method2", choices = choice_map, selected = isolate(input$silhouette_biplot_method2))
+    updateSelectInput(session, "silhouette_biplot_method1", choices = c("Choose a method" = "", choice_map), selected = isolate(input$silhouette_biplot_method1))
+    updateSelectInput(session, "silhouette_biplot_method2", choices = c("Choose a method" = "", choice_map), selected = isolate(input$silhouette_biplot_method2))
   })
 
   output$gene_symbol_datalist <- renderUI({
