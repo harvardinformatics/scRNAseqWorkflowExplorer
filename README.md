@@ -1,4 +1,4 @@
-# Visualizing inter and intra-cluster stability
+# Comparing outputs from scRNA-seq workflows
 This repostiory contains a Shiny app the purpose of which is to generate visualizations for comparing the outputs of multiple scRNA-seq workflows run on a single scRNA-seq sample library. The app has been designed to take as input the outputs from two Snakemake workflows: 
 
 * A workflow that generates scRNA-seq Seurat objects stored in R *rds* files, including the endpoints of 6 pre-processing tool combinations, and 11 additional rds files for intermediate steps in the workflow tree; this workflow can be found [here](https://github.com/harvardinformatics/scRNAseq-preprocessing).
