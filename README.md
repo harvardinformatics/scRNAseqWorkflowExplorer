@@ -28,7 +28,9 @@ install.packages(
 ### Data files
 Put your *.rds* files and downsampling (.tsv)  files output by the Snakemake workflow in the *data/* directory. Next,
 
-Launch the app from this directory:
+There are two main ways to launch the app. One can launch it from a terminal window.
+
+From inside the `shiny/` directory:
 
 ```bash
 Rscript -e "shiny::runApp('.')"
@@ -40,5 +42,10 @@ Or from anywhere using the full path:
 Rscript -e "shiny::runApp('/PATH/TO/shiny')"
 ```
 
+Alternatively, you can launch it from the R (typically Rstudio) console
 
+```bash
+setwd("/path/to/app")
+shiny::runApp(".")
+```
 
