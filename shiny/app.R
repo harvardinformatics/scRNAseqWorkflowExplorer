@@ -675,6 +675,27 @@ ui <- fluidPage(
       )
     ),
     tabPanel(
+      "Silhouette width NJ tree",
+      sidebarLayout(
+        sidebarPanel(
+          width = 4,
+          shiny::tagList(
+            helpText("Build a neighbor-joining tree across all selected methods using RMSD on cell-level silhouette widths over barcodes shared across every selected method."),
+            helpText("RMSD (root mean squared deviation) is computed by taking the difference in silhouette width for each shared barcode between two methods, squaring those differences, averaging them, and taking the square root."),
+            helpText("Node labels show bootstrap support: the percentage of 100 bootstrap replicates that recovered that node.")
+          ),
+          actionButton("refresh_silhouette_tree", "Refresh method list"),
+          downloadButton("download_silhouette_tree_pdf", "Download hi-res PDF")
+        ),
+        mainPanel(
+          width = 8,
+          uiOutput("silhouette_tree_error"),
+          plotOutput("silhouette_tree_plot", height = "620px"),
+          verbatimTextOutput("silhouette_tree_status")
+        )
+      )
+    ),
+    tabPanel(
       "Shared barcodes",
       sidebarLayout(
         sidebarPanel(
@@ -874,6 +895,7 @@ server <- function(input, output, session) {
   observeEvent(input$refresh_jaccard, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_silhouette_biplot, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_silhouette_stability, refresh_choices(), ignoreInit = TRUE)
+  observeEvent(input$refresh_silhouette_tree, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_config, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_upset, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$config_select_all_files, {
@@ -1067,6 +1089,21 @@ server <- function(input, output, session) {
 
   all_method_data_safe <- reactive({
     capture_condition_message(all_method_data())
+  })
+
+  silhouette_tree_data <- reactive({
+    methods <- all_method_data()
+
+    validate(
+      need(length(methods) >= 2, "At least two selected methods are required for the silhouette-width NJ tree.")
+    )
+
+    build_silhouette_nj_tree(
+      meta_list = purrr::map(methods, "meta"),
+      method_names = purrr::map_chr(methods, "label"),
+      bootstrap = TRUE,
+      n_boot = 100
+    )
   })
 
   all_seurat_objects <- reactive({
@@ -1304,6 +1341,16 @@ server <- function(input, output, session) {
     })$error
   })
 
+  silhouette_tree_error_message <- reactive({
+    if (workflows_confirmed() || !identical(input$analysis_tabs, "Silhouette width NJ tree")) {
+      return(NULL)
+    }
+
+    capture_condition_message({
+      silhouette_tree_data()
+    })$error
+  })
+
   upset_error_message <- reactive({
     if (workflows_confirmed() || !identical(input$analysis_tabs, "Shared barcodes")) {
       return(NULL)
@@ -1342,6 +1389,10 @@ server <- function(input, output, session) {
 
   output$silhouette_stability_error <- renderUI({
     render_tab_error_box(silhouette_stability_error_message())
+  })
+
+  output$silhouette_tree_error <- renderUI({
+    render_tab_error_box(silhouette_tree_error_message())
   })
 
   output$upset_error <- renderUI({
@@ -1449,6 +1500,15 @@ server <- function(input, output, session) {
   output$silhouette_stability_plot <- renderPlot({
     req(is.null(silhouette_stability_error_message()))
     silhouette_stability_plot_obj()
+  }, res = 110)
+
+  output$silhouette_tree_plot <- renderPlot({
+    req(is.null(silhouette_tree_error_message()))
+    tree_data <- silhouette_tree_data()
+    plot_silhouette_nj_tree(
+      tree_data$nj_tree,
+      bootstrap_support = tree_data$bootstrap_support
+    )
   }, res = 110)
 
   output$barcode_upset_plot <- renderPlot({
@@ -1569,6 +1629,23 @@ server <- function(input, output, session) {
           color_metric = metrics[["color"]],
           for_pdf = TRUE
         )
+      )
+    }
+  )
+
+  output$download_silhouette_tree_pdf <- downloadHandler(
+    filename = function() {
+      paste0("silhouette-width-nj-tree-", format(Sys.Date(), "%Y%m%d"), ".pdf")
+    },
+    content = function(file) {
+      tree_data <- silhouette_tree_data()
+
+      grDevices::pdf(file, width = 8, height = 7, onefile = TRUE)
+      on.exit(grDevices::dev.off(), add = TRUE)
+      plot_silhouette_nj_tree(
+        tree_data$nj_tree,
+        bootstrap_support = tree_data$bootstrap_support,
+        for_pdf = TRUE
       )
     }
   )
@@ -1854,6 +1931,28 @@ server <- function(input, output, session) {
       " of ",
       union_barcodes,
       " total in the union. Missing-barcode values are plotted at -1."
+    )
+  })
+
+  output$silhouette_tree_status <- renderText({
+    if (!workflows_confirmed() && !is.null(silhouette_tree_error_message())) {
+      return(paste0("Full error message:\n", silhouette_tree_error_message()))
+    }
+
+    methods <- if (workflows_confirmed()) all_method_data() else all_method_data_safe()$result
+    tree_data <- silhouette_tree_data()
+
+    paste0(
+      "Built an NJ tree for ",
+      length(methods),
+      " selected methods using ",
+      length(tree_data$shared_barcodes_used),
+      " shared barcodes with non-missing silhouette widths across all methods",
+      if (isTRUE(tree_data$bootstrap)) {
+        paste0(", with bootstrap support from ", tree_data$n_boot, " replicates.")
+      } else {
+        "."
+      }
     )
   })
 
