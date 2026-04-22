@@ -1773,8 +1773,8 @@ server <- function(input, output, session) {
         need(any(!is.na(plot_data$expression)), "Selected gene symbol was not found in the loaded methods.")
       )
 
-      pdf_width <- 7
-      pdf_height <- 6
+      pdf_width <- 8.5
+      pdf_height <- 6.5
 
       grDevices::pdf(file, width = pdf_width, height = pdf_height, onefile = TRUE)
       on.exit(grDevices::dev.off(), add = TRUE)

@@ -1053,6 +1053,7 @@ make_expression_heatmap_plot <- function(plot_data, gene_symbol, cluster_annotat
   method_levels <- levels(plot_data$method)
   n_methods <- length(method_levels)
   has_display_x <- "display_x" %in% names(plot_data)
+  max_method_label_chars <- max(nchar(method_levels), 1)
 
   plot_data <- plot_data %>%
     dplyr::mutate(
@@ -1074,12 +1075,20 @@ make_expression_heatmap_plot <- function(plot_data, gene_symbol, cluster_annotat
     y_index = 1
   )
 
-  y_axis_text_size <- if (for_pdf) 10 else 8
+  y_axis_text_size <- if (for_pdf) {
+    max(6.2, 10 - 0.13 * max(max_method_label_chars - 22, 0))
+  } else {
+    max(5.5, 8 - 0.11 * max(max_method_label_chars - 22, 0))
+  }
   plot_title_size <- if (for_pdf) 13 else 11
   tile_height <- if (for_pdf) 0.84 else 0.92
   tile_width <- 1
-  top_margin <- 48
-  bottom_margin <- if (identical(sort_mode, "cluster") && nrow(cluster_annotations) > 0) 84 else 42
+  top_margin <- if (for_pdf) 28 else 48
+  bottom_margin <- if (identical(sort_mode, "cluster") && nrow(cluster_annotations) > 0) {
+    if (for_pdf) 56 else 84
+  } else {
+    if (for_pdf) 26 else 42
+  }
   boundary_bands <- if (identical(sort_mode, "cluster") && length(cluster_boundaries) > 0) {
     tibble::tibble(x = cluster_boundaries)
   } else {
@@ -1143,7 +1152,7 @@ make_expression_heatmap_plot <- function(plot_data, gene_symbol, cluster_annotat
       axis.text.x = ggplot2::element_blank(),
       axis.ticks.x = ggplot2::element_blank(),
       axis.title.x = ggplot2::element_text(margin = ggplot2::margin(t = 8)),
-      axis.text.y = ggplot2::element_text(size = y_axis_text_size, color = "black"),
+      axis.text.y = ggplot2::element_text(size = y_axis_text_size, color = "black", margin = ggplot2::margin(r = 4)),
       plot.title = ggplot2::element_text(size = plot_title_size),
       legend.title = ggplot2::element_text(size = if (for_pdf) 10 else 8, face = "bold"),
       legend.text = ggplot2::element_text(size = if (for_pdf) 9 else 7),
