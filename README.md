@@ -28,6 +28,9 @@ install.packages(
 ### Data files
 Put your *.rds* files and downsampling (.tsv)  files output by the Snakemake workflow in the *data/* directory. Next,
 
+
+
+### Launch the app
 There are two main ways to launch the app. One can launch it from a terminal window.
 
 From inside the `shiny/` directory:
