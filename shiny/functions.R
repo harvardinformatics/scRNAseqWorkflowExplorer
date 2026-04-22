@@ -4,21 +4,21 @@ jaccard_similarity <- function(set1, set2) {
   intersect_length / union_length
 }
 
-make_shared_barcodes_upset_plot <- function(seurat_objects, method_names = NULL, min_size = 1, for_pdf = FALSE) {
-  if (is.null(names(seurat_objects)) && is.null(method_names)) {
-    stop("Provide `method_names` or a named list of Seurat objects.")
+make_shared_barcodes_upset_plot <- function(barcode_sets, method_names = NULL, min_size = 1, for_pdf = FALSE) {
+  if (is.null(names(barcode_sets)) && is.null(method_names)) {
+    stop("Provide `method_names` or a named list of barcode vectors.")
   }
 
-  if (!is.list(seurat_objects) || length(seurat_objects) == 0) {
-    stop("`seurat_objects` must be a non-empty list of Seurat objects.")
+  if (!is.list(barcode_sets) || length(barcode_sets) == 0) {
+    stop("`barcode_sets` must be a non-empty list of barcode vectors.")
   }
 
   if (is.null(method_names)) {
-    method_names <- names(seurat_objects)
+    method_names <- names(barcode_sets)
   }
 
-  if (length(method_names) != length(seurat_objects)) {
-    stop("`method_names` must have the same length as `seurat_objects`.")
+  if (length(method_names) != length(barcode_sets)) {
+    stop("`method_names` must have the same length as `barcode_sets`.")
   }
 
   if (length(unique(method_names)) != length(method_names)) {
@@ -31,21 +31,16 @@ make_shared_barcodes_upset_plot <- function(seurat_objects, method_names = NULL,
 
   min_size <- as.integer(min_size)
 
-  invalid_objects <- !purrr::map_lgl(seurat_objects, inherits, "Seurat")
-  if (any(invalid_objects)) {
-    stop(
-      "All entries in `seurat_objects` must inherit from Seurat. Invalid methods: ",
-      paste(method_names[invalid_objects], collapse = ", ")
-    )
-  }
+  barcode_membership <- purrr::map2_dfr(barcode_sets, method_names, function(barcodes, method_name) {
+    if (!is.atomic(barcodes)) {
+      stop("Each entry in `barcode_sets` must be an atomic vector. Invalid method: ", method_name)
+    }
 
-  barcode_membership <- purrr::map2_dfr(seurat_objects, method_names, function(obj, method_name) {
     tibble::tibble(
-      cell_barcode = colnames(obj),
+      cell_barcode = as.character(barcodes),
       method = method_name
     )
   }) %>%
-    dplyr::bind_rows() %>%
     dplyr::distinct(cell_barcode, method) %>%
     dplyr::mutate(member = TRUE) %>%
     tidyr::pivot_wider(
@@ -699,7 +694,8 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
                                              x_metric = "median_silhouette",
                                              y_metric = "median_max_jaccard",
                                              color_metric = "cluster_size",
-                                             for_pdf = FALSE) {
+                                             for_pdf = FALSE,
+                                             max_columns = 3) {
   if (length(meta_list) != length(downsamp_list) || length(meta_list) != length(method_labels)) {
     stop("meta_list, downsamp_list, and method_labels must have the same length.")
   }
@@ -878,7 +874,7 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
 
   mid_cs <- stats::median(summary_df$cluster_size, na.rm = TRUE)
   n_methods <- length(method_labels)
-  facet_cols <- max(1, ceiling(sqrt(n_methods)))
+  facet_cols <- max(1, min(max_columns, n_methods))
   base_strip_size <- if (for_pdf) 11 else 10
   min_strip_size <- if (for_pdf) 8.5 else 8
   target_line_chars <- max(22, floor(if (for_pdf) 56 / facet_cols else 50 / facet_cols))
@@ -941,7 +937,8 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
     ) +
     ggplot2::facet_wrap(
       ~ method_display,
-      scales = "fixed"
+      scales = "fixed",
+      ncol = facet_cols
     ) +
     ggplot2::scale_x_continuous(limits = x_spec$limits) +
     ggplot2::scale_y_continuous(limits = y_spec$limits) +

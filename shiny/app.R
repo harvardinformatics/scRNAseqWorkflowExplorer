@@ -117,6 +117,25 @@ read_named_seurat_objects <- function(rds_paths) {
   stats::setNames(seurat_objects, object_labels)
 }
 
+read_named_barcode_sets <- function(rds_paths) {
+  barcode_sets <- purrr::map(rds_paths, function(path) {
+    obj <- readRDS(path)
+
+    if (!inherits(obj, "Seurat")) {
+      stop("RDS is not a Seurat object: ", basename(path))
+    }
+
+    barcodes <- colnames(obj)
+    rm(obj)
+    unique(barcodes)
+  })
+
+  object_labels <- stringr::str_remove(basename(rds_paths), "\\.rds$") %>%
+    make.unique(sep = "_")
+
+  stats::setNames(barcode_sets, object_labels)
+}
+
 default_method_label <- function(rds_path) {
   stringr::str_remove(basename(rds_path), "\\.rds$")
 }
@@ -669,7 +688,7 @@ ui <- fluidPage(
         mainPanel(
           width = 8,
           uiOutput("silhouette_stability_error"),
-          plotOutput("silhouette_stability_plot", height = "620px"),
+          uiOutput("silhouette_stability_plot_ui"),
           verbatimTextOutput("silhouette_stability_status")
         )
       )
@@ -1117,6 +1136,17 @@ server <- function(input, output, session) {
     read_named_seurat_objects(rds_paths)
   })
 
+  all_barcode_sets <- reactive({
+    rds_paths <- seurat_object_paths()
+
+    validate(
+      need(length(rds_paths) > 0, "No Seurat .rds files found in ./data."),
+      need(length(rds_paths) >= 2, "At least two Seurat .rds files are required for a barcode overlap summary.")
+    )
+
+    read_named_barcode_sets(rds_paths)
+  })
+
   observe({
     pairs <- method_pairs()
     label_map <- method_labels()
@@ -1226,7 +1256,24 @@ server <- function(input, output, session) {
       method_labels = purrr::map_chr(methods, "label"),
       x_metric = metrics[["x"]],
       y_metric = metrics[["y"]],
-      color_metric = metrics[["color"]]
+      color_metric = metrics[["color"]],
+      max_columns = 3
+    )
+  })
+
+  silhouette_stability_layout <- reactive({
+    methods <- all_method_data()
+    facet_cols <- min(3L, max(1L, length(methods)))
+    facet_rows <- if (length(methods) == 0) 1L else ceiling(length(methods) / facet_cols)
+    plot_height_px <- max(620L, 290L * facet_rows)
+    viewport_height_px <- min(900L, plot_height_px)
+
+    list(
+      n_methods = length(methods),
+      facet_cols = facet_cols,
+      facet_rows = facet_rows,
+      plot_height_px = plot_height_px,
+      viewport_height_px = viewport_height_px
     )
   })
 
@@ -1357,11 +1404,11 @@ server <- function(input, output, session) {
     }
 
     capture_condition_message({
-      seurat_objects <- all_seurat_objects()
+      barcode_sets <- all_barcode_sets()
       label_map <- method_labels()
 
       make_shared_barcodes_upset_plot(
-        seurat_objects,
+        barcode_sets,
         method_names = make.unique(
           purrr::map_chr(seurat_object_paths(), ~ resolve_method_label(label_map, .x)),
           sep = "_"
@@ -1389,6 +1436,21 @@ server <- function(input, output, session) {
 
   output$silhouette_stability_error <- renderUI({
     render_tab_error_box(silhouette_stability_error_message())
+  })
+
+  output$silhouette_stability_plot_ui <- renderUI({
+    layout <- silhouette_stability_layout()
+
+    shiny::div(
+      style = paste0(
+        "max-height:", layout$viewport_height_px, "px;",
+        "overflow-y:auto; overflow-x:hidden; border:1px solid #ddd; padding:6px 8px 0 0;"
+      ),
+      plotOutput(
+        "silhouette_stability_plot",
+        height = paste0(layout$plot_height_px, "px")
+      )
+    )
   })
 
   output$silhouette_tree_error <- renderUI({
@@ -1513,10 +1575,10 @@ server <- function(input, output, session) {
 
   output$barcode_upset_plot <- renderPlot({
     req(is.null(upset_error_message()))
-    seurat_objects <- all_seurat_objects()
+    barcode_sets <- all_barcode_sets()
     label_map <- method_labels()
     make_shared_barcodes_upset_plot(
-      seurat_objects,
+      barcode_sets,
       method_names = make.unique(
         purrr::map_chr(seurat_object_paths(), ~ resolve_method_label(label_map, .x)),
         sep = "_"
@@ -1563,13 +1625,13 @@ server <- function(input, output, session) {
       paste0("shared-cell-barcodes-upset-", format(Sys.Date(), "%Y%m%d"), ".pdf")
     },
     content = function(file) {
-      seurat_objects <- all_seurat_objects()
+      barcode_sets <- all_barcode_sets()
       label_map <- method_labels()
 
       grDevices::pdf(file, width = 10, height = 7, onefile = TRUE)
       on.exit(grDevices::dev.off(), add = TRUE)
       print(make_shared_barcodes_upset_plot(
-        seurat_objects,
+        barcode_sets,
         method_names = make.unique(
           purrr::map_chr(seurat_object_paths(), ~ resolve_method_label(label_map, .x)),
           sep = "_"
@@ -1617,19 +1679,33 @@ server <- function(input, output, session) {
       methods <- all_method_data()
       metrics <- silhouette_stability_metrics()
 
-      grDevices::pdf(file, width = 10, height = 7, onefile = TRUE)
-      on.exit(grDevices::dev.off(), add = TRUE)
-      print(
-        ClusterStabilityVsSilhouettePlot(
-          meta_list = purrr::map(methods, "meta"),
-          downsamp_list = purrr::map(methods, "bootstraps"),
-          method_labels = purrr::map_chr(methods, "label"),
-          x_metric = metrics[["x"]],
-          y_metric = metrics[["y"]],
-          color_metric = metrics[["color"]],
-          for_pdf = TRUE
-        )
+      validate(
+        need(length(methods) > 0, "No valid method pairs found in ./data."),
+        need(length(unique(unname(metrics))) == 3, "Choose three different metrics for the x-axis, y-axis, and color ramp.")
       )
+
+      page_method_count <- 9L
+      page_indices <- split(seq_along(methods), ceiling(seq_along(methods) / page_method_count))
+
+      grDevices::pdf(file, width = 10, height = 10, onefile = TRUE)
+      on.exit(grDevices::dev.off(), add = TRUE)
+
+      purrr::walk(page_indices, function(idx) {
+        page_methods <- methods[idx]
+
+        print(
+          ClusterStabilityVsSilhouettePlot(
+            meta_list = purrr::map(page_methods, "meta"),
+            downsamp_list = purrr::map(page_methods, "bootstraps"),
+            method_labels = purrr::map_chr(page_methods, "label"),
+            x_metric = metrics[["x"]],
+            y_metric = metrics[["y"]],
+            color_metric = metrics[["color"]],
+            for_pdf = TRUE,
+            max_columns = 3
+          )
+        )
+      })
     }
   )
 
@@ -1971,12 +2047,12 @@ server <- function(input, output, session) {
       return("Found 1 Seurat object in ./data. At least two are required for the shared-barcode UpSet plot.")
     }
 
-    seurat_objects <- all_seurat_objects()
-    barcode_union <- sort(unique(unlist(purrr::map(seurat_objects, colnames))))
+    barcode_sets <- all_barcode_sets()
+    barcode_union <- sort(unique(unlist(barcode_sets, use.names = FALSE)))
 
     paste0(
-      "Loaded ",
-      length(seurat_objects),
+      "Loaded barcode sets for ",
+      length(barcode_sets),
       " Seurat objects from ./data with ",
       length(barcode_union),
       " unique cell barcodes across methods. Minimum intersection size: ",
