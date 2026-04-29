@@ -283,6 +283,177 @@ jaccard_heatmap_plot <- function(meta1, meta2,
     )
 }
 
+marker_gene_jaccard_heatmap_plot <- function(markers1, markers2,
+                                             name1, name2, threshold = 0.2,
+                                             padj_threshold = 0.05,
+                                             for_pdf = FALSE) {
+  required_cols <- c("cluster", "genesymbol", "p_val_adj")
+  missing1 <- setdiff(required_cols, names(markers1))
+  missing2 <- setdiff(required_cols, names(markers2))
+
+  if (length(missing1) > 0) {
+    stop(
+      "Marker-gene table for method `", name1, "` is missing required column",
+      if (length(missing1) > 1) "s: " else ": ",
+      paste0("`", missing1, "`", collapse = ", "),
+      "."
+    )
+  }
+
+  if (length(missing2) > 0) {
+    stop(
+      "Marker-gene table for method `", name2, "` is missing required column",
+      if (length(missing2) > 1) "s: " else ": ",
+      paste0("`", missing2, "`", collapse = ", "),
+      "."
+    )
+  }
+
+  if (!is.numeric(padj_threshold) || length(padj_threshold) != 1 || is.na(padj_threshold) || padj_threshold < 0) {
+    stop("`padj_threshold` must be a single number greater than or equal to 0.")
+  }
+
+  marker_sets1 <- markers1 %>%
+    dplyr::mutate(
+      cluster = as.character(.data$cluster),
+      genesymbol = as.character(.data$genesymbol),
+      p_val_adj = suppressWarnings(as.numeric(.data$p_val_adj))
+    ) %>%
+    dplyr::filter(
+      !is.na(.data$cluster), !is.na(.data$genesymbol), nzchar(.data$cluster), nzchar(.data$genesymbol),
+      !is.na(.data$p_val_adj), .data$p_val_adj <= padj_threshold
+    ) %>%
+    dplyr::distinct(.data$cluster, .data$genesymbol) %>%
+    dplyr::group_by(.data$cluster) %>%
+    dplyr::summarise(genes = list(unique(.data$genesymbol)), .groups = "drop")
+
+  marker_sets2 <- markers2 %>%
+    dplyr::mutate(
+      cluster = as.character(.data$cluster),
+      genesymbol = as.character(.data$genesymbol),
+      p_val_adj = suppressWarnings(as.numeric(.data$p_val_adj))
+    ) %>%
+    dplyr::filter(
+      !is.na(.data$cluster), !is.na(.data$genesymbol), nzchar(.data$cluster), nzchar(.data$genesymbol),
+      !is.na(.data$p_val_adj), .data$p_val_adj <= padj_threshold
+    ) %>%
+    dplyr::distinct(.data$cluster, .data$genesymbol) %>%
+    dplyr::group_by(.data$cluster) %>%
+    dplyr::summarise(genes = list(unique(.data$genesymbol)), .groups = "drop")
+
+  if (nrow(marker_sets1) == 0 || nrow(marker_sets2) == 0) {
+    stop("No non-empty cluster marker-gene sets were found for one or both selected methods.")
+  }
+
+  jaccard_list <- list()
+  for (i in seq_len(nrow(marker_sets1))) {
+    for (j in seq_len(nrow(marker_sets2))) {
+      similarity <- jaccard_similarity(marker_sets1$genes[[i]], marker_sets2$genes[[j]])
+      jaccard_list[[length(jaccard_list) + 1]] <- list(
+        cluster1 = marker_sets1$cluster[[i]],
+        cluster2 = marker_sets2$cluster[[j]],
+        jaccard_similarity = similarity
+      )
+    }
+  }
+
+  jaccard_df <- do.call(rbind, lapply(jaccard_list, as.data.frame))
+  jaccard_df <- type.convert(jaccard_df, as.is = TRUE)
+
+  jaccard_df$cluster1 <- factor(
+    jaccard_df$cluster1,
+    levels = arrange_cluster_levels(as.character(jaccard_df$cluster1))
+  )
+  jaccard_df$cluster2 <- factor(
+    jaccard_df$cluster2,
+    levels = arrange_cluster_levels(as.character(jaccard_df$cluster2))
+  )
+
+  label_df <- jaccard_df %>%
+    dplyr::filter(jaccard_similarity >= threshold) %>%
+    dplyr::mutate(jaccard_label = if (for_pdf) "*" else format(round(jaccard_similarity, 2), nsmall = 2))
+
+  threshold_note <- paste0(
+    "Marker-gene cluster pairs\n",
+    "Jaccard threshold: ",
+    format(threshold, trim = TRUE),
+    "\nBH adj. p-value ≤ ",
+    format(padj_threshold, trim = TRUE)
+  )
+  legend_note_df <- tibble::tibble(
+    cluster1 = levels(jaccard_df$cluster1)[[1]],
+    cluster2 = levels(jaccard_df$cluster2)[[1]],
+    threshold_note = threshold_note
+  )
+
+  ggplot2::ggplot(
+    data = jaccard_df,
+    ggplot2::aes(x = cluster1, y = cluster2, fill = jaccard_similarity)
+  ) +
+    ggplot2::geom_tile(color = "black", linewidth = 0.35) +
+    ggplot2::scale_fill_gradient(
+      low = "white",
+      high = "firebrick",
+      breaks = seq(0, 1, 0.2),
+      limits = c(0, 1)
+    ) +
+    ggplot2::geom_text(
+      data = label_df,
+      ggplot2::aes(label = jaccard_label),
+      size = if (for_pdf) 4.2 else 2.8,
+      color = "black",
+      hjust = 0.5,
+      vjust = if (for_pdf) 0.62 else 0.5
+    ) +
+    ggplot2::geom_point(
+      data = legend_note_df,
+      ggplot2::aes(x = cluster1, y = cluster2, alpha = threshold_note),
+      inherit.aes = FALSE,
+      shape = 15,
+      size = 0,
+      show.legend = TRUE
+    ) +
+    ggplot2::scale_x_discrete(name = name1) +
+    ggplot2::scale_y_discrete(name = name2) +
+    ggplot2::scale_alpha_manual(
+      values = stats::setNames(0, threshold_note),
+      guide = ggplot2::guide_legend(
+        order = 2,
+        title = NULL,
+        override.aes = list(alpha = 0, size = 0)
+      )
+    ) +
+    ggplot2::labs(fill = "Marker-gene Jaccard similarity") +
+    ggplot2::coord_equal() +
+    ggplot2::theme_minimal(base_size = 12) +
+    ggplot2::theme(
+      panel.grid.major = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      panel.background = ggplot2::element_blank(),
+      axis.text.x = ggplot2::element_text(size = if (for_pdf) 9 else 10, angle = 90, vjust = 0.5, hjust = 1),
+      axis.text.y = ggplot2::element_text(size = if (for_pdf) 9 else 10),
+      axis.title.x = ggplot2::element_text(size = if (for_pdf) 11.2 else 14),
+      axis.title.y = ggplot2::element_text(size = if (for_pdf) 11.2 else 14),
+      legend.title.align = 0,
+      legend.text.align = 0,
+      legend.box = "vertical",
+      legend.spacing.y = grid::unit(6, "pt")
+    ) +
+    ggplot2::guides(
+      fill = ggplot2::guide_colorbar(order = 1),
+      alpha = ggplot2::guide_legend(
+        order = 2,
+        title = NULL,
+        label.hjust = 0,
+        keywidth = grid::unit(0, "pt"),
+        keyheight = grid::unit(0, "pt"),
+        label.theme = ggplot2::element_text(hjust = 0, margin = ggplot2::margin(l = -8)),
+        default.unit = "pt",
+        override.aes = list(alpha = 0, size = 0)
+      )
+    )
+}
+
 MakeInterVsIntraStablePlot <- function(meta1, meta2,
                                        bootstraps1, bootstraps2,
                                        threshold, label1, label2) {
