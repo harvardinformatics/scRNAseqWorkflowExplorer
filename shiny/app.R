@@ -142,7 +142,7 @@ read_marker_gene_csv <- function(csv_path) {
     stringr::str_replace_all("_+", "_") %>%
     stringr::str_replace_all("^_|_$", "")
 
-  required <- c("genesymbol", "cluster", "p_val_adj")
+  required <- c("genesymbol", "cluster", "p_val_adj", "avg_log2fc")
   missing <- setdiff(required, names(marker_df))
 
   if (length(missing) > 0) {
@@ -156,10 +156,11 @@ read_marker_gene_csv <- function(csv_path) {
     dplyr::transmute(
       genesymbol = as.character(.data$genesymbol),
       cluster = as.character(.data$cluster),
-      p_val_adj = suppressWarnings(as.numeric(.data$p_val_adj))
+      p_val_adj = suppressWarnings(as.numeric(.data$p_val_adj)),
+      avg_log2fc = suppressWarnings(as.numeric(.data$avg_log2fc))
     ) %>%
     dplyr::filter(!is.na(.data$genesymbol), nzchar(.data$genesymbol), !is.na(.data$cluster), nzchar(.data$cluster)) %>%
-    dplyr::distinct(.data$cluster, .data$genesymbol, .data$p_val_adj)
+    dplyr::distinct(.data$cluster, .data$genesymbol, .data$p_val_adj, .data$avg_log2fc)
 }
 
 find_seurat_object_paths <- function(data_dir = "data") {
@@ -729,6 +730,48 @@ ui <- fluidPage(
       )
     ),
     tabPanel(
+      "Marker gene specificity",
+      sidebarLayout(
+        sidebarPanel(
+          width = 4,
+          helpText("Across all selected methods, plot the within-cluster proportion of marker genes that are specific to that cluster under the chosen specificity rule."),
+          selectInput(
+            "marker_specificity_mode",
+            "Specificity calculation",
+            choices = c(
+              "Upregulated in cluster; not significant or significantly downregulated elsewhere" = "up_specific",
+              "Downregulated in cluster; not significant or significantly upregulated elsewhere" = "down_specific",
+              "Significantly up or downregulated in cluster; not significant elsewhere" = "exclusive_significant"
+            ),
+            selected = "up_specific"
+          ),
+          numericInput(
+            "marker_specificity_padj_threshold",
+            "Benjamini-Hochberg adjusted p-value threshold",
+            value = 0.05,
+            min = 0,
+            max = 1,
+            step = 0.001
+          ),
+          numericInput(
+            "marker_specificity_abs_logfc_threshold",
+            "Minimum absolute log-fold change",
+            value = 0,
+            min = 0,
+            step = 0.1
+          ),
+          actionButton("refresh_marker_specificity", "Refresh method list"),
+          downloadButton("download_marker_specificity_pdf", "Download hi-res PDF")
+        ),
+        mainPanel(
+          width = 8,
+          uiOutput("marker_specificity_error"),
+          plotOutput("marker_specificity_plot", height = "620px"),
+          verbatimTextOutput("marker_specificity_status")
+        )
+      )
+    ),
+    tabPanel(
       "Silhouette width biplot",
       sidebarLayout(
         sidebarPanel(
@@ -883,6 +926,16 @@ server <- function(input, output, session) {
     normalize_min_size_input(input$upset_min_size, default = 1L)
   })
 
+  marker_specificity_abs_logfc_value <- reactive({
+    value <- input$marker_specificity_abs_logfc_threshold
+
+    if (is.null(value) || length(value) != 1 || is.na(value) || !is.finite(value) || value < 0) {
+      return(0)
+    }
+
+    as.numeric(value)
+  })
+
   silhouette_stability_metrics <- reactive({
     defaults <- c(
       x = "median_silhouette",
@@ -1019,6 +1072,7 @@ server <- function(input, output, session) {
   observeEvent(input$refresh, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_jaccard, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_marker_jaccard, refresh_choices(), ignoreInit = TRUE)
+  observeEvent(input$refresh_marker_specificity, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_silhouette_biplot, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_silhouette_stability, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_silhouette_tree, refresh_choices(), ignoreInit = TRUE)
@@ -1204,6 +1258,36 @@ server <- function(input, output, session) {
       markers1 = read_marker_gene_csv(marker1),
       markers2 = read_marker_gene_csv(marker2)
     )
+  })
+
+  all_marker_gene_method_data <- reactive({
+    rds_paths <- seurat_object_paths()
+    label_map <- method_labels()
+
+    validate(
+      need(length(rds_paths) > 0, "No Seurat .rds files found in ./data.")
+    )
+
+    marker_paths <- purrr::map_chr(rds_paths, infer_marker_gene_path)
+    missing_marker_paths <- marker_paths[!file.exists(marker_paths)]
+
+    validate(
+      need(
+        length(missing_marker_paths) == 0,
+        paste0(
+          "Missing marker-gene CSV file(s): ",
+          paste(basename(missing_marker_paths), collapse = ", ")
+        )
+      )
+    )
+
+    purrr::map2(rds_paths, marker_paths, function(rds_path, marker_path) {
+      list(
+        rds = rds_path,
+        label = resolve_method_label(label_map, rds_path),
+        markers = read_marker_gene_csv(marker_path)
+      )
+    })
   })
 
   loaded_silhouette_biplot_data <- reactive({
@@ -1500,6 +1584,24 @@ server <- function(input, output, session) {
     })$error
   })
 
+  marker_specificity_error_message <- reactive({
+    if (workflows_confirmed() || !identical(input$analysis_tabs, "Marker gene specificity")) {
+      return(NULL)
+    }
+
+    capture_condition_message({
+      methods <- all_marker_gene_method_data()
+
+      marker_gene_specificity_plot(
+        marker_tables = purrr::map(methods, "markers"),
+        method_labels = purrr::map_chr(methods, "label"),
+        specificity_mode = input$marker_specificity_mode,
+        padj_threshold = input$marker_specificity_padj_threshold,
+        abs_logfc_threshold = marker_specificity_abs_logfc_value()
+      )
+    })$error
+  })
+
   silhouette_biplot_error_message <- reactive({
     if (workflows_confirmed() || !identical(input$analysis_tabs, "Silhouette width biplot")) {
       return(NULL)
@@ -1588,6 +1690,10 @@ server <- function(input, output, session) {
 
   output$marker_jaccard_error <- renderUI({
     render_tab_error_box(marker_jaccard_error_message())
+  })
+
+  output$marker_specificity_error <- renderUI({
+    render_tab_error_box(marker_specificity_error_message())
   })
 
   output$silhouette_biplot_error <- renderUI({
@@ -1721,6 +1827,19 @@ server <- function(input, output, session) {
     )
   }, res = 110)
 
+  output$marker_specificity_plot <- renderPlot({
+    req(is.null(marker_specificity_error_message()))
+    methods <- all_marker_gene_method_data()
+
+    marker_gene_specificity_plot(
+      marker_tables = purrr::map(methods, "markers"),
+      method_labels = purrr::map_chr(methods, "label"),
+      specificity_mode = input$marker_specificity_mode,
+      padj_threshold = input$marker_specificity_padj_threshold,
+      abs_logfc_threshold = marker_specificity_abs_logfc_value()
+    )
+  }, res = 110)
+
   output$silhouette_biplot_plot <- renderPlot({
     req(is.null(silhouette_biplot_error_message()))
     dat <- loaded_silhouette_biplot_data()
@@ -1826,6 +1945,26 @@ server <- function(input, output, session) {
         name2 = label2,
         threshold = input$marker_jaccard_threshold,
         padj_threshold = input$marker_jaccard_padj_threshold,
+        for_pdf = TRUE
+      ))
+    }
+  )
+
+  output$download_marker_specificity_pdf <- downloadHandler(
+    filename = function() {
+      paste0("marker-gene-specificity-", format(Sys.Date(), "%Y%m%d"), ".pdf")
+    },
+    content = function(file) {
+      methods <- all_marker_gene_method_data()
+
+      grDevices::pdf(file, width = 9.5, height = 6.5, onefile = TRUE)
+      on.exit(grDevices::dev.off(), add = TRUE)
+      print(marker_gene_specificity_plot(
+        marker_tables = purrr::map(methods, "markers"),
+        method_labels = purrr::map_chr(methods, "label"),
+        specificity_mode = input$marker_specificity_mode,
+        padj_threshold = input$marker_specificity_padj_threshold,
+        abs_logfc_threshold = marker_specificity_abs_logfc_value(),
         for_pdf = TRUE
       ))
     }
@@ -2195,6 +2334,39 @@ server <- function(input, output, session) {
       " are excluded. Heatmap cells at or above ",
       format(input$marker_jaccard_threshold, trim = TRUE),
       " are annotated with *."
+    )
+  })
+
+  output$marker_specificity_status <- renderText({
+    if (!workflows_confirmed() && !is.null(marker_specificity_error_message())) {
+      return(paste0("Full error message:\n", marker_specificity_error_message()))
+    }
+
+    methods <- all_marker_gene_method_data()
+    cluster_total <- methods %>%
+      purrr::map("markers") %>%
+      purrr::map_int(~ dplyr::n_distinct(.x$cluster)) %>%
+      sum()
+
+    mode_label <- dplyr::case_match(
+      input$marker_specificity_mode,
+      "up_specific" ~ "upregulated in cluster, absent or significantly downregulated elsewhere",
+      "down_specific" ~ "downregulated in cluster, absent or significantly upregulated elsewhere",
+      "exclusive_significant" ~ "significant in cluster, not significant elsewhere"
+    )
+
+    paste0(
+      "Loaded ",
+      length(methods),
+      " methods spanning ",
+      cluster_total,
+      " clusters. Specificity mode: ",
+      mode_label,
+      ". Benjamini-Hochberg adjusted p-value threshold: ",
+      format(input$marker_specificity_padj_threshold, trim = TRUE),
+      ". Minimum absolute log-fold change: ",
+      format(marker_specificity_abs_logfc_value(), trim = TRUE),
+      "."
     )
   })
 

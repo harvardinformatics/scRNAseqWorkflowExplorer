@@ -454,6 +454,181 @@ marker_gene_jaccard_heatmap_plot <- function(markers1, markers2,
     )
 }
 
+marker_gene_specificity_plot <- function(marker_tables, method_labels,
+                                         specificity_mode = "up_specific",
+                                         padj_threshold = 0.05,
+                                         abs_logfc_threshold = 0,
+                                         for_pdf = FALSE) {
+  if (!is.list(marker_tables) || length(marker_tables) == 0) {
+    stop("Provide at least one marker-gene table.")
+  }
+
+  if (length(marker_tables) != length(method_labels)) {
+    stop("`marker_tables` and `method_labels` must have the same length.")
+  }
+
+  if (!is.numeric(padj_threshold) || length(padj_threshold) != 1 || is.na(padj_threshold) || padj_threshold < 0) {
+    stop("`padj_threshold` must be a single number greater than or equal to 0.")
+  }
+
+  if (!is.numeric(abs_logfc_threshold) || length(abs_logfc_threshold) != 1 || is.na(abs_logfc_threshold) || abs_logfc_threshold < 0) {
+    stop("`abs_logfc_threshold` must be a single number greater than or equal to 0.")
+  }
+
+  mode_choices <- c("up_specific", "down_specific", "exclusive_significant")
+  if (!(specificity_mode %in% mode_choices)) {
+    stop("`specificity_mode` must be one of: ", paste(mode_choices, collapse = ", "))
+  }
+
+  required_cols <- c("cluster", "genesymbol", "p_val_adj", "avg_log2fc")
+  specificity_df <- purrr::map2_dfr(marker_tables, method_labels, function(marker_tbl, method_label) {
+    missing_cols <- setdiff(required_cols, names(marker_tbl))
+    if (length(missing_cols) > 0) {
+      stop(
+        "Marker-gene table for method `", method_label, "` is missing required column",
+        if (length(missing_cols) > 1) "s: " else ": ",
+        paste0("`", missing_cols, "`", collapse = ", "),
+        "."
+      )
+    }
+
+    marker_tbl <- marker_tbl %>%
+      dplyr::mutate(
+        cluster = as.character(.data$cluster),
+        genesymbol = as.character(.data$genesymbol),
+        p_val_adj = suppressWarnings(as.numeric(.data$p_val_adj)),
+        avg_log2fc = suppressWarnings(as.numeric(.data$avg_log2fc)),
+        significant = !is.na(.data$p_val_adj) & .data$p_val_adj <= padj_threshold & !is.na(.data$avg_log2fc) & abs(.data$avg_log2fc) >= abs_logfc_threshold,
+        up = .data$significant & !is.na(.data$avg_log2fc) & .data$avg_log2fc > 0,
+        down = .data$significant & !is.na(.data$avg_log2fc) & .data$avg_log2fc < 0
+      ) %>%
+      dplyr::filter(!is.na(.data$cluster), nzchar(.data$cluster), !is.na(.data$genesymbol), nzchar(.data$genesymbol)) %>%
+      dplyr::distinct(.data$cluster, .data$genesymbol, .keep_all = TRUE)
+
+    clusters <- arrange_cluster_levels(marker_tbl$cluster)
+
+    gene_summary <- marker_tbl %>%
+      dplyr::group_by(.data$genesymbol) %>%
+      dplyr::summarise(
+        non_down_sig_total = sum(.data$significant & !.data$down, na.rm = TRUE),
+        non_up_sig_total = sum(.data$significant & !.data$up, na.rm = TRUE),
+        significant_total = sum(.data$significant, na.rm = TRUE),
+        .groups = "drop"
+      )
+
+    cluster_specificity <- marker_tbl %>%
+      dplyr::left_join(gene_summary, by = "genesymbol") %>%
+      dplyr::mutate(
+        candidate = dplyr::case_when(
+          specificity_mode == "up_specific" ~ .data$up,
+          specificity_mode == "down_specific" ~ .data$down,
+          specificity_mode == "exclusive_significant" ~ .data$significant
+        ),
+        specific = dplyr::case_when(
+          specificity_mode == "up_specific" ~ .data$up & .data$non_down_sig_total <= 1,
+          specificity_mode == "down_specific" ~ .data$down & .data$non_up_sig_total <= 1,
+          specificity_mode == "exclusive_significant" ~ .data$significant & .data$significant_total <= 1
+        )
+      ) %>%
+      dplyr::group_by(.data$cluster) %>%
+      dplyr::summarise(
+        n_specific = sum(.data$specific, na.rm = TRUE),
+        n_total = sum(.data$candidate, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      dplyr::mutate(
+        method = method_label,
+        specificity = dplyr::if_else(.data$n_total > 0, .data$n_specific / .data$n_total, NA_real_)
+      )
+
+    tibble::tibble(cluster = clusters) %>%
+      dplyr::left_join(cluster_specificity, by = "cluster") %>%
+      dplyr::mutate(
+        method = dplyr::coalesce(.data$method, method_label),
+        n_specific = dplyr::coalesce(.data$n_specific, 0L),
+        n_total = dplyr::coalesce(.data$n_total, 0L),
+        specificity = .data$specificity
+      ) %>%
+      dplyr::select("method", "cluster", "specificity", "n_specific", "n_total")
+  })
+
+  if (nrow(specificity_df) == 0) {
+    stop("No cluster-level marker-gene specificity values could be calculated.")
+  }
+
+  mode_label <- dplyr::case_match(
+    specificity_mode,
+    "up_specific" ~ "Upregulated in cluster; absent or significantly downregulated elsewhere",
+    "down_specific" ~ "Downregulated in cluster; absent or significantly upregulated elsewhere",
+    "exclusive_significant" ~ "Significant in cluster; not significant elsewhere"
+  )
+
+  plotted_df <- specificity_df %>%
+    dplyr::filter(!is.na(.data$specificity)) %>%
+    dplyr::mutate(
+      method = factor(.data$method, levels = method_labels)
+    )
+
+  if (nrow(plotted_df) == 0) {
+    stop("No clusters had any marker genes meeting the current specificity mode and adjusted p-value threshold.")
+  }
+
+  median_df <- plotted_df %>%
+    dplyr::group_by(.data$method) %>%
+    dplyr::summarise(
+      median_specificity = stats::median(.data$specificity, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  max_specificity <- max(c(plotted_df$specificity, median_df$median_specificity), na.rm = TRUE)
+  x_lower <- -0.02
+  x_upper <- max(0.05, max_specificity * 1.03)
+  if (max_specificity >= 0.99) {
+    x_upper <- max(x_upper, 1.02)
+  }
+
+  ggplot2::ggplot(
+    plotted_df,
+    ggplot2::aes(x = .data$specificity, y = .data$method)
+  ) +
+    ggplot2::geom_point(
+      position = ggplot2::position_jitter(width = 0, height = 0.18),
+      size = if (for_pdf) 2.4 else 2.1,
+      alpha = if (for_pdf) 0.85 else 0.78,
+      color = "dodgerblue"
+    ) +
+    ggplot2::geom_point(
+      data = median_df,
+      ggplot2::aes(x = .data$median_specificity, y = .data$method),
+      inherit.aes = FALSE,
+      shape = 3,
+      size = if (for_pdf) 4.3 else 3.8,
+      stroke = if (for_pdf) 1.05 else 0.95,
+      color = "firebrick"
+    ) +
+    ggplot2::scale_x_continuous(
+      limits = c(x_lower, x_upper),
+      breaks = pretty(c(0, x_upper), n = 5),
+      expand = c(0, 0)
+    ) +
+    ggplot2::labs(
+      x = "Cluster-specific marker-gene proportion",
+      y = NULL,
+      subtitle = paste0(
+        mode_label,
+        "\nBH adjusted p-value threshold: ",
+        format(padj_threshold, trim = TRUE),
+        "; minimum |logFC|: ",
+        format(abs_logfc_threshold, trim = TRUE)
+      )
+    ) +
+    ggplot2::theme_classic(base_size = if (for_pdf) 12 else 11) +
+    ggplot2::theme(
+      panel.grid.minor = ggplot2::element_blank(),
+      plot.subtitle = ggplot2::element_text(size = if (for_pdf) 10 else 9)
+    )
+}
+
 MakeInterVsIntraStablePlot <- function(meta1, meta2,
                                        bootstraps1, bootstraps2,
                                        threshold, label1, label2) {
