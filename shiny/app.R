@@ -772,7 +772,7 @@ ui <- fluidPage(
       )
     ),
     tabPanel(
-      "Cluster barcode vs marker similarity",
+      "Cluster barcode vs marker gene similarity",
       sidebarLayout(
         sidebarPanel(
           width = 4,
@@ -1638,7 +1638,7 @@ server <- function(input, output, session) {
   })
 
   cluster_vs_marker_error_message <- reactive({
-    if (workflows_confirmed() || !identical(input$analysis_tabs, "Cluster barcode vs marker similarity")) {
+    if (workflows_confirmed() || !identical(input$analysis_tabs, "Cluster barcode vs marker gene similarity")) {
       return(NULL)
     }
 
@@ -2077,7 +2077,7 @@ server <- function(input, output, session) {
       page_method_count <- 9L
       page_indices <- split(seq_along(methods), ceiling(seq_along(methods) / page_method_count))
 
-      grDevices::pdf(file, width = 10, height = 10, onefile = TRUE)
+      grDevices::pdf(file, width = 10, height = 7.5, onefile = TRUE)
       on.exit(grDevices::dev.off(), add = TRUE)
 
       purrr::walk(page_indices, function(idx) {

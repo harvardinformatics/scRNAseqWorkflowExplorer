@@ -645,6 +645,20 @@ cluster_vs_marker_jaccard_plot <- function(meta_list, marker_tables, method_labe
     strip_text_size <- max(min_strip_size, strip_text_size)
   }
 
+  threshold_note_key <- "threshold_note"
+  threshold_note_label <- bquote(
+    atop(
+      "Marker genes defined with",
+      paste("BH adj. p-value " <= .(format(padj_threshold, trim = TRUE)))
+    )
+  )
+  legend_note_df <- tibble::tibble(
+    focal_method_display = rendered_method_labels[[1]],
+    cluster_barcode_jaccard = 0,
+    cluster_marker_jaccard = 0,
+    threshold_note = threshold_note_key
+  )
+
   point_df <- point_df %>%
     dplyr::mutate(
       focal_method_display = factor(
@@ -674,6 +688,23 @@ cluster_vs_marker_jaccard_plot <- function(meta_list, marker_tables, method_labe
       low = "dodgerblue",
       high = "firebrick"
     ) +
+    ggplot2::geom_point(
+      data = legend_note_df,
+      ggplot2::aes(x = .data$cluster_barcode_jaccard, y = .data$cluster_marker_jaccard, alpha = .data$threshold_note),
+      inherit.aes = FALSE,
+      shape = 16,
+      size = 0,
+      show.legend = TRUE
+    ) +
+    ggplot2::scale_alpha_manual(
+      values = stats::setNames(0, threshold_note_key),
+      labels = list(threshold_note_label),
+      guide = ggplot2::guide_legend(
+        order = 2,
+        title = NULL,
+        override.aes = list(alpha = 0, size = 0)
+      )
+    ) +
     ggplot2::labs(
       x = "Cluster barcode sharing Jaccard similarity",
       y = "Cluster marker gene sharing Jaccard similarity"
@@ -690,7 +721,24 @@ cluster_vs_marker_jaccard_plot <- function(meta_list, marker_tables, method_labe
         lineheight = 0.95,
         margin = ggplot2::margin(5, 0, 5, 0)
       ),
-      legend.position = "right"
+      legend.position = "right",
+      legend.title.align = 0,
+      legend.text.align = 0,
+      legend.box = "vertical",
+      legend.spacing.y = grid::unit(6, "pt")
+    ) +
+    ggplot2::guides(
+      color = ggplot2::guide_colorbar(order = 1),
+      alpha = ggplot2::guide_legend(
+        order = 2,
+        title = NULL,
+        label.hjust = 0,
+        keywidth = grid::unit(0, "pt"),
+        keyheight = grid::unit(0, "pt"),
+        label.theme = ggplot2::element_text(hjust = 0, margin = ggplot2::margin(l = -8)),
+        default.unit = "pt",
+        override.aes = list(alpha = 0, size = 0)
+      )
     )
 }
 
