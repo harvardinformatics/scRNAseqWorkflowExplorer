@@ -265,7 +265,8 @@ calculate_marker_gene_jaccard_df <- function(markers1, markers2, padj_threshold 
       jaccard_list[[length(jaccard_list) + 1]] <- list(
         cluster1 = marker_sets1$cluster[[i]],
         cluster2 = marker_sets2$cluster[[j]],
-        jaccard_similarity = similarity
+        jaccard_similarity = similarity,
+        shared_marker_genes = intersect_size
       )
     }
   }
@@ -512,8 +513,11 @@ cluster_vs_marker_jaccard_plot <- function(meta_list, marker_tables, method_labe
       dplyr::mutate(cluster1 = as.character(.data$cluster1), cluster2 = as.character(.data$cluster2))
 
     merged <- dplyr::inner_join(
-      cluster_df %>% dplyr::rename(cluster_barcode_jaccard = .data$jaccard_similarity),
-      marker_df %>% dplyr::rename(cluster_marker_jaccard = .data$jaccard_similarity),
+      cluster_df %>% dplyr::rename(cluster_barcode_jaccard = "jaccard_similarity"),
+      marker_df %>% dplyr::rename(
+        cluster_marker_jaccard = "jaccard_similarity",
+        shared_marker_genes = "shared_marker_genes"
+      ),
       by = c("cluster1", "cluster2")
     )
 
@@ -525,6 +529,7 @@ cluster_vs_marker_jaccard_plot <- function(meta_list, marker_tables, method_labe
           cluster2 = .data$cluster1,
           cluster_barcode_jaccard = .data$cluster_barcode_jaccard,
           cluster_marker_jaccard = .data$cluster_marker_jaccard,
+          shared_marker_genes = .data$shared_marker_genes,
           focal_method = method_labels[[j]],
           other_method = method_labels[[i]]
         )
@@ -650,16 +655,25 @@ cluster_vs_marker_jaccard_plot <- function(meta_list, marker_tables, method_labe
 
   ggplot2::ggplot(
     point_df,
-    ggplot2::aes(x = .data$cluster_barcode_jaccard, y = .data$cluster_marker_jaccard)
+    ggplot2::aes(
+      x = .data$cluster_barcode_jaccard,
+      y = .data$cluster_marker_jaccard,
+      color = .data$shared_marker_genes
+    )
   ) +
     ggplot2::geom_point(
       size = if (for_pdf) 1.5 else 1.3,
       alpha = if (for_pdf) 0.58 else 0.5,
-      color = "dodgerblue4"
+      show.legend = TRUE
     ) +
     ggplot2::facet_wrap(~ focal_method_display, ncol = facet_cols) +
     ggplot2::scale_x_continuous(limits = c(0, 1)) +
     ggplot2::scale_y_continuous(limits = c(0, 1)) +
+    ggplot2::scale_color_gradient(
+      name = "Shared marker genes",
+      low = "dodgerblue",
+      high = "firebrick"
+    ) +
     ggplot2::labs(
       x = "Cluster barcode sharing Jaccard similarity",
       y = "Cluster marker gene sharing Jaccard similarity"
@@ -675,7 +689,8 @@ cluster_vs_marker_jaccard_plot <- function(meta_list, marker_tables, method_labe
         vjust = 0.5,
         lineheight = 0.95,
         margin = ggplot2::margin(5, 0, 5, 0)
-      )
+      ),
+      legend.position = "right"
     )
 }
 
