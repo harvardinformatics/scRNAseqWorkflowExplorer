@@ -695,7 +695,7 @@ ui <- fluidPage(
       )
     ),
     tabPanel(
-      "Marker-gene cluster similarity heatmap",
+      "Marker gene cluster similarity heatmap",
       sidebarLayout(
         sidebarPanel(
           width = 4,
@@ -768,6 +768,31 @@ ui <- fluidPage(
           uiOutput("marker_specificity_error"),
           plotOutput("marker_specificity_plot", height = "620px"),
           verbatimTextOutput("marker_specificity_status")
+        )
+      )
+    ),
+    tabPanel(
+      "Cluster barcode vs marker similarity",
+      sidebarLayout(
+        sidebarPanel(
+          width = 4,
+          helpText("Across all selected methods, compare cluster barcode-sharing Jaccard similarities to marker-gene-sharing Jaccard similarities on matched cluster pairs."),
+          numericInput(
+            "cluster_vs_marker_padj_threshold",
+            "Benjamini-Hochberg adjusted p-value threshold",
+            value = 0.05,
+            min = 0,
+            max = 1,
+            step = 0.001
+          ),
+          actionButton("refresh_cluster_vs_marker", "Refresh method list"),
+          downloadButton("download_cluster_vs_marker_pdf", "Download hi-res PDF")
+        ),
+        mainPanel(
+          width = 8,
+          uiOutput("cluster_vs_marker_error"),
+          uiOutput("cluster_vs_marker_plot_ui"),
+          verbatimTextOutput("cluster_vs_marker_status")
         )
       )
     ),
@@ -1073,6 +1098,7 @@ server <- function(input, output, session) {
   observeEvent(input$refresh_jaccard, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_marker_jaccard, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_marker_specificity, refresh_choices(), ignoreInit = TRUE)
+  observeEvent(input$refresh_cluster_vs_marker, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_silhouette_biplot, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_silhouette_stability, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_silhouette_tree, refresh_choices(), ignoreInit = TRUE)
@@ -1287,6 +1313,15 @@ server <- function(input, output, session) {
         label = resolve_method_label(label_map, rds_path),
         markers = read_marker_gene_csv(marker_path)
       )
+    })
+  })
+
+  all_cluster_and_marker_method_data <- reactive({
+    marker_methods <- all_marker_gene_method_data()
+
+    purrr::map(marker_methods, function(method) {
+      method$meta <- read_seurat_cluster_meta(method$rds)
+      method
     })
   })
 
@@ -1563,7 +1598,7 @@ server <- function(input, output, session) {
   })
 
   marker_jaccard_error_message <- reactive({
-    if (workflows_confirmed() || !identical(input$analysis_tabs, "Marker-gene cluster similarity heatmap")) {
+    if (workflows_confirmed() || !identical(input$analysis_tabs, "Marker gene cluster similarity heatmap")) {
       return(NULL)
     }
 
@@ -1598,6 +1633,28 @@ server <- function(input, output, session) {
         specificity_mode = input$marker_specificity_mode,
         padj_threshold = input$marker_specificity_padj_threshold,
         abs_logfc_threshold = marker_specificity_abs_logfc_value()
+      )
+    })$error
+  })
+
+  cluster_vs_marker_error_message <- reactive({
+    if (workflows_confirmed() || !identical(input$analysis_tabs, "Cluster barcode vs marker similarity")) {
+      return(NULL)
+    }
+
+    capture_condition_message({
+      methods <- all_cluster_and_marker_method_data()
+
+      validate(
+        need(length(methods) >= 2, "At least two selected methods are required.")
+      )
+
+      cluster_vs_marker_jaccard_plot(
+        meta_list = purrr::map(methods, "meta"),
+        marker_tables = purrr::map(methods, "markers"),
+        method_labels = purrr::map_chr(methods, "label"),
+        padj_threshold = input$cluster_vs_marker_padj_threshold,
+        max_columns = 3
       )
     })$error
   })
@@ -1694,6 +1751,29 @@ server <- function(input, output, session) {
 
   output$marker_specificity_error <- renderUI({
     render_tab_error_box(marker_specificity_error_message())
+  })
+
+  output$cluster_vs_marker_error <- renderUI({
+    render_tab_error_box(cluster_vs_marker_error_message())
+  })
+
+  output$cluster_vs_marker_plot_ui <- renderUI({
+    methods <- all_cluster_and_marker_method_data()
+    facet_cols <- min(3L, max(1L, length(methods)))
+    facet_rows <- if (length(methods) == 0) 1L else ceiling(length(methods) / facet_cols)
+    plot_height_px <- max(620L, 290L * facet_rows)
+    viewport_height_px <- min(900L, plot_height_px)
+
+    shiny::div(
+      style = paste0(
+        "max-height:", viewport_height_px, "px;",
+        "overflow-y:auto; overflow-x:hidden; border:1px solid #ddd; padding:6px 8px 0 0;"
+      ),
+      plotOutput(
+        "cluster_vs_marker_plot",
+        height = paste0(plot_height_px, "px")
+      )
+    )
   })
 
   output$silhouette_biplot_error <- renderUI({
@@ -1840,6 +1920,19 @@ server <- function(input, output, session) {
     )
   }, res = 110)
 
+  output$cluster_vs_marker_plot <- renderPlot({
+    req(is.null(cluster_vs_marker_error_message()))
+    methods <- all_cluster_and_marker_method_data()
+
+    cluster_vs_marker_jaccard_plot(
+      meta_list = purrr::map(methods, "meta"),
+      marker_tables = purrr::map(methods, "markers"),
+      method_labels = purrr::map_chr(methods, "label"),
+      padj_threshold = input$cluster_vs_marker_padj_threshold,
+      max_columns = 3
+    )
+  }, res = 110)
+
   output$silhouette_biplot_plot <- renderPlot({
     req(is.null(silhouette_biplot_error_message()))
     dat <- loaded_silhouette_biplot_data()
@@ -1967,6 +2060,37 @@ server <- function(input, output, session) {
         abs_logfc_threshold = marker_specificity_abs_logfc_value(),
         for_pdf = TRUE
       ))
+    }
+  )
+
+  output$download_cluster_vs_marker_pdf <- downloadHandler(
+    filename = function() {
+      paste0("cluster-barcode-vs-marker-similarity-", format(Sys.Date(), "%Y%m%d"), ".pdf")
+    },
+    content = function(file) {
+      methods <- all_cluster_and_marker_method_data()
+
+      validate(
+        need(length(methods) >= 2, "At least two selected methods are required.")
+      )
+
+      page_method_count <- 9L
+      page_indices <- split(seq_along(methods), ceiling(seq_along(methods) / page_method_count))
+
+      grDevices::pdf(file, width = 10, height = 10, onefile = TRUE)
+      on.exit(grDevices::dev.off(), add = TRUE)
+
+      purrr::walk(page_indices, function(idx) {
+        page_methods <- methods[idx]
+        print(cluster_vs_marker_jaccard_plot(
+          meta_list = purrr::map(page_methods, "meta"),
+          marker_tables = purrr::map(page_methods, "markers"),
+          method_labels = purrr::map_chr(page_methods, "label"),
+          padj_threshold = input$cluster_vs_marker_padj_threshold,
+          for_pdf = TRUE,
+          max_columns = 3
+        ))
+      })
     }
   )
 
@@ -2329,6 +2453,7 @@ server <- function(input, output, session) {
       cluster_count1,
       " / ",
       cluster_count2,
+      ". Shared genes are only counted in the intersection when they are regulated in the same direction in both methods",
       ". Genes with Benjamini-Hochberg adjusted p-value above ",
       format(input$marker_jaccard_padj_threshold, trim = TRUE),
       " are excluded. Heatmap cells at or above ",
@@ -2366,6 +2491,38 @@ server <- function(input, output, session) {
       format(input$marker_specificity_padj_threshold, trim = TRUE),
       ". Minimum absolute log-fold change: ",
       format(marker_specificity_abs_logfc_value(), trim = TRUE),
+      "."
+    )
+  })
+
+  output$cluster_vs_marker_status <- renderText({
+    if (!workflows_confirmed() && !is.null(cluster_vs_marker_error_message())) {
+      return(paste0("Full error message:\n", cluster_vs_marker_error_message()))
+    }
+
+    methods <- all_cluster_and_marker_method_data()
+    pair_indices <- utils::combn(seq_along(methods), 2, simplify = FALSE)
+    point_total <- purrr::map_int(pair_indices, function(idx) {
+      cluster_df <- calculate_cluster_jaccard_df(methods[[idx[[1]]]]$meta, methods[[idx[[2]]]]$meta) %>%
+        dplyr::mutate(cluster1 = as.character(.data$cluster1), cluster2 = as.character(.data$cluster2))
+      marker_df <- calculate_marker_gene_jaccard_df(
+        methods[[idx[[1]]]]$markers,
+        methods[[idx[[2]]]]$markers,
+        padj_threshold = input$cluster_vs_marker_padj_threshold
+      ) %>%
+        dplyr::mutate(cluster1 = as.character(.data$cluster1), cluster2 = as.character(.data$cluster2))
+
+      nrow(dplyr::inner_join(cluster_df, marker_df, by = c("cluster1", "cluster2")))
+    }) %>%
+      sum()
+
+    paste0(
+      "Loaded ",
+      length(methods),
+      " methods. The plot includes ",
+      point_total,
+      " matched cluster-pair similarity points across all pairwise method comparisons. Benjamini-Hochberg adjusted p-value threshold: ",
+      format(input$cluster_vs_marker_padj_threshold, trim = TRUE),
       "."
     )
   })

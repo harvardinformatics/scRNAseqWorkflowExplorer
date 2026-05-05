@@ -153,23 +153,21 @@ arrange_cluster_levels <- function(cluster_values) {
   }
 }
 
-jaccard_heatmap_plot <- function(meta1, meta2,
-                                 name1, name2, threshold = 0.6,
-                                 for_pdf = FALSE) {
+calculate_cluster_jaccard_df <- function(meta1, meta2) {
   clusters1 <- tibble::tibble(
     cellbarcode = rownames(meta1),
-    clusterid1 = as.character(meta1$seurat_clusters)
+    cluster1 = as.character(meta1$seurat_clusters)
   )
 
   clusters2 <- tibble::tibble(
     cellbarcode = rownames(meta2),
-    clusterid2 = as.character(meta2$seurat_clusters)
+    cluster2 = as.character(meta2$seurat_clusters)
   )
 
   clusters_merged <- dplyr::full_join(clusters1, clusters2, by = "cellbarcode")
 
-  indices1 <- split(seq_len(nrow(clusters_merged)), clusters_merged$clusterid1)
-  indices2 <- split(seq_len(nrow(clusters_merged)), clusters_merged$clusterid2)
+  indices1 <- split(seq_len(nrow(clusters_merged)), clusters_merged$cluster1)
+  indices2 <- split(seq_len(nrow(clusters_merged)), clusters_merged$cluster2)
 
   indices1 <- indices1[!is.na(names(indices1))]
   indices2 <- indices2[!is.na(names(indices2))]
@@ -197,6 +195,100 @@ jaccard_heatmap_plot <- function(meta1, meta2,
     jaccard_df$cluster2,
     levels = arrange_cluster_levels(as.character(jaccard_df$cluster2))
   )
+
+  tibble::as_tibble(jaccard_df)
+}
+
+calculate_marker_gene_jaccard_df <- function(markers1, markers2, padj_threshold = 0.05) {
+  if (!is.numeric(padj_threshold) || length(padj_threshold) != 1 || is.na(padj_threshold) || padj_threshold < 0) {
+    stop("`padj_threshold` must be a single number greater than or equal to 0.")
+  }
+
+  marker_sets1 <- markers1 %>%
+    dplyr::mutate(
+      cluster = as.character(.data$cluster),
+      genesymbol = as.character(.data$genesymbol),
+      p_val_adj = suppressWarnings(as.numeric(.data$p_val_adj)),
+      avg_log2fc = suppressWarnings(as.numeric(.data$avg_log2fc)),
+      direction = dplyr::case_when(
+        !is.na(.data$avg_log2fc) & .data$avg_log2fc > 0 ~ "up",
+        !is.na(.data$avg_log2fc) & .data$avg_log2fc < 0 ~ "down",
+        TRUE ~ NA_character_
+      )
+    ) %>%
+    dplyr::filter(
+      !is.na(.data$cluster), !is.na(.data$genesymbol), nzchar(.data$cluster), nzchar(.data$genesymbol),
+      !is.na(.data$p_val_adj), .data$p_val_adj <= padj_threshold, !is.na(.data$direction)
+    ) %>%
+    dplyr::distinct(.data$cluster, .data$genesymbol, .data$direction) %>%
+    dplyr::group_by(.data$cluster) %>%
+    dplyr::summarise(
+      genes = list(unique(.data$genesymbol)),
+      directed_genes = list(unique(paste(.data$genesymbol, .data$direction, sep = "::"))),
+      .groups = "drop"
+    )
+
+  marker_sets2 <- markers2 %>%
+    dplyr::mutate(
+      cluster = as.character(.data$cluster),
+      genesymbol = as.character(.data$genesymbol),
+      p_val_adj = suppressWarnings(as.numeric(.data$p_val_adj)),
+      avg_log2fc = suppressWarnings(as.numeric(.data$avg_log2fc)),
+      direction = dplyr::case_when(
+        !is.na(.data$avg_log2fc) & .data$avg_log2fc > 0 ~ "up",
+        !is.na(.data$avg_log2fc) & .data$avg_log2fc < 0 ~ "down",
+        TRUE ~ NA_character_
+      )
+    ) %>%
+    dplyr::filter(
+      !is.na(.data$cluster), !is.na(.data$genesymbol), nzchar(.data$cluster), nzchar(.data$genesymbol),
+      !is.na(.data$p_val_adj), .data$p_val_adj <= padj_threshold, !is.na(.data$direction)
+    ) %>%
+    dplyr::distinct(.data$cluster, .data$genesymbol, .data$direction) %>%
+    dplyr::group_by(.data$cluster) %>%
+    dplyr::summarise(
+      genes = list(unique(.data$genesymbol)),
+      directed_genes = list(unique(paste(.data$genesymbol, .data$direction, sep = "::"))),
+      .groups = "drop"
+    )
+
+  if (nrow(marker_sets1) == 0 || nrow(marker_sets2) == 0) {
+    stop("No non-empty cluster marker-gene sets were found for one or both selected methods.")
+  }
+
+  jaccard_list <- list()
+  for (i in seq_len(nrow(marker_sets1))) {
+    for (j in seq_len(nrow(marker_sets2))) {
+      union_genes <- union(marker_sets1$genes[[i]], marker_sets2$genes[[j]])
+      intersect_size <- length(intersect(marker_sets1$directed_genes[[i]], marker_sets2$directed_genes[[j]]))
+      similarity <- if (length(union_genes) == 0) 0 else intersect_size / length(union_genes)
+      jaccard_list[[length(jaccard_list) + 1]] <- list(
+        cluster1 = marker_sets1$cluster[[i]],
+        cluster2 = marker_sets2$cluster[[j]],
+        jaccard_similarity = similarity
+      )
+    }
+  }
+
+  jaccard_df <- do.call(rbind, lapply(jaccard_list, as.data.frame))
+  jaccard_df <- type.convert(jaccard_df, as.is = TRUE)
+
+  jaccard_df$cluster1 <- factor(
+    jaccard_df$cluster1,
+    levels = arrange_cluster_levels(as.character(jaccard_df$cluster1))
+  )
+  jaccard_df$cluster2 <- factor(
+    jaccard_df$cluster2,
+    levels = arrange_cluster_levels(as.character(jaccard_df$cluster2))
+  )
+
+  tibble::as_tibble(jaccard_df)
+}
+
+jaccard_heatmap_plot <- function(meta1, meta2,
+                                 name1, name2, threshold = 0.6,
+                                 for_pdf = FALSE) {
+  jaccard_df <- calculate_cluster_jaccard_df(meta1, meta2)
 
   label_df <- jaccard_df %>%
     dplyr::filter(jaccard_similarity >= threshold) %>%
@@ -287,7 +379,7 @@ marker_gene_jaccard_heatmap_plot <- function(markers1, markers2,
                                              name1, name2, threshold = 0.2,
                                              padj_threshold = 0.05,
                                              for_pdf = FALSE) {
-  required_cols <- c("cluster", "genesymbol", "p_val_adj")
+  required_cols <- c("cluster", "genesymbol", "p_val_adj", "avg_log2fc")
   missing1 <- setdiff(required_cols, names(markers1))
   missing2 <- setdiff(required_cols, names(markers2))
 
@@ -309,65 +401,7 @@ marker_gene_jaccard_heatmap_plot <- function(markers1, markers2,
     )
   }
 
-  if (!is.numeric(padj_threshold) || length(padj_threshold) != 1 || is.na(padj_threshold) || padj_threshold < 0) {
-    stop("`padj_threshold` must be a single number greater than or equal to 0.")
-  }
-
-  marker_sets1 <- markers1 %>%
-    dplyr::mutate(
-      cluster = as.character(.data$cluster),
-      genesymbol = as.character(.data$genesymbol),
-      p_val_adj = suppressWarnings(as.numeric(.data$p_val_adj))
-    ) %>%
-    dplyr::filter(
-      !is.na(.data$cluster), !is.na(.data$genesymbol), nzchar(.data$cluster), nzchar(.data$genesymbol),
-      !is.na(.data$p_val_adj), .data$p_val_adj <= padj_threshold
-    ) %>%
-    dplyr::distinct(.data$cluster, .data$genesymbol) %>%
-    dplyr::group_by(.data$cluster) %>%
-    dplyr::summarise(genes = list(unique(.data$genesymbol)), .groups = "drop")
-
-  marker_sets2 <- markers2 %>%
-    dplyr::mutate(
-      cluster = as.character(.data$cluster),
-      genesymbol = as.character(.data$genesymbol),
-      p_val_adj = suppressWarnings(as.numeric(.data$p_val_adj))
-    ) %>%
-    dplyr::filter(
-      !is.na(.data$cluster), !is.na(.data$genesymbol), nzchar(.data$cluster), nzchar(.data$genesymbol),
-      !is.na(.data$p_val_adj), .data$p_val_adj <= padj_threshold
-    ) %>%
-    dplyr::distinct(.data$cluster, .data$genesymbol) %>%
-    dplyr::group_by(.data$cluster) %>%
-    dplyr::summarise(genes = list(unique(.data$genesymbol)), .groups = "drop")
-
-  if (nrow(marker_sets1) == 0 || nrow(marker_sets2) == 0) {
-    stop("No non-empty cluster marker-gene sets were found for one or both selected methods.")
-  }
-
-  jaccard_list <- list()
-  for (i in seq_len(nrow(marker_sets1))) {
-    for (j in seq_len(nrow(marker_sets2))) {
-      similarity <- jaccard_similarity(marker_sets1$genes[[i]], marker_sets2$genes[[j]])
-      jaccard_list[[length(jaccard_list) + 1]] <- list(
-        cluster1 = marker_sets1$cluster[[i]],
-        cluster2 = marker_sets2$cluster[[j]],
-        jaccard_similarity = similarity
-      )
-    }
-  }
-
-  jaccard_df <- do.call(rbind, lapply(jaccard_list, as.data.frame))
-  jaccard_df <- type.convert(jaccard_df, as.is = TRUE)
-
-  jaccard_df$cluster1 <- factor(
-    jaccard_df$cluster1,
-    levels = arrange_cluster_levels(as.character(jaccard_df$cluster1))
-  )
-  jaccard_df$cluster2 <- factor(
-    jaccard_df$cluster2,
-    levels = arrange_cluster_levels(as.character(jaccard_df$cluster2))
-  )
+  jaccard_df <- calculate_marker_gene_jaccard_df(markers1, markers2, padj_threshold = padj_threshold)
 
   label_df <- jaccard_df %>%
     dplyr::filter(jaccard_similarity >= threshold) %>%
@@ -378,7 +412,8 @@ marker_gene_jaccard_heatmap_plot <- function(markers1, markers2,
     "Jaccard threshold: ",
     format(threshold, trim = TRUE),
     "\nBH adj. p-value ≤ ",
-    format(padj_threshold, trim = TRUE)
+    format(padj_threshold, trim = TRUE),
+    "\nIntersection counts same-direction genes only"
   )
   legend_note_df <- tibble::tibble(
     cluster1 = levels(jaccard_df$cluster1)[[1]],
@@ -450,6 +485,196 @@ marker_gene_jaccard_heatmap_plot <- function(markers1, markers2,
         label.theme = ggplot2::element_text(hjust = 0, margin = ggplot2::margin(l = -8)),
         default.unit = "pt",
         override.aes = list(alpha = 0, size = 0)
+      )
+    )
+}
+
+cluster_vs_marker_jaccard_plot <- function(meta_list, marker_tables, method_labels,
+                                           padj_threshold = 0.05,
+                                           for_pdf = FALSE,
+                                           max_columns = 3) {
+  if (length(meta_list) != length(marker_tables) || length(meta_list) != length(method_labels)) {
+    stop("`meta_list`, `marker_tables`, and `method_labels` must have the same length.")
+  }
+
+  if (length(meta_list) < 2) {
+    stop("At least two methods are required.")
+  }
+
+  pair_indices <- utils::combn(seq_along(method_labels), 2, simplify = FALSE)
+  point_df <- purrr::map_dfr(pair_indices, function(idx) {
+    i <- idx[[1]]
+    j <- idx[[2]]
+
+    cluster_df <- calculate_cluster_jaccard_df(meta_list[[i]], meta_list[[j]]) %>%
+      dplyr::mutate(cluster1 = as.character(.data$cluster1), cluster2 = as.character(.data$cluster2))
+    marker_df <- calculate_marker_gene_jaccard_df(marker_tables[[i]], marker_tables[[j]], padj_threshold = padj_threshold) %>%
+      dplyr::mutate(cluster1 = as.character(.data$cluster1), cluster2 = as.character(.data$cluster2))
+
+    merged <- dplyr::inner_join(
+      cluster_df %>% dplyr::rename(cluster_barcode_jaccard = .data$jaccard_similarity),
+      marker_df %>% dplyr::rename(cluster_marker_jaccard = .data$jaccard_similarity),
+      by = c("cluster1", "cluster2")
+    )
+
+    dplyr::bind_rows(
+      merged %>% dplyr::mutate(focal_method = method_labels[[i]], other_method = method_labels[[j]]),
+      merged %>%
+        dplyr::transmute(
+          cluster1 = .data$cluster2,
+          cluster2 = .data$cluster1,
+          cluster_barcode_jaccard = .data$cluster_barcode_jaccard,
+          cluster_marker_jaccard = .data$cluster_marker_jaccard,
+          focal_method = method_labels[[j]],
+          other_method = method_labels[[i]]
+        )
+    )
+  })
+
+  if (nrow(point_df) == 0) {
+    stop("No matched cluster-pair Jaccard similarities were available across the selected methods.")
+  }
+
+  n_methods <- length(method_labels)
+  facet_cols <- max(1, min(max_columns, n_methods))
+  base_strip_size <- if (for_pdf) 11 else 10
+  min_strip_size <- if (for_pdf) 8.5 else 8
+  target_line_chars <- max(22, floor(if (for_pdf) 56 / facet_cols else 50 / facet_cols))
+
+  render_method_strip_label <- function(label, target_width, min_font_size, base_font_size, max_lines = 3) {
+    label <- stringr::str_squish(as.character(label))
+
+    if (!nzchar(label)) {
+      return(label)
+    }
+
+    split_for_strip <- function(text) {
+      text %>%
+        stringr::str_replace_all("([+_-])", "\\1 ") %>%
+        stringr::str_squish() %>%
+        stringr::str_split("\\s+", simplify = FALSE) %>%
+        purrr::pluck(1)
+    }
+
+    single_line_size <- base_font_size * target_width / max(1, nchar(label))
+    tokens <- split_for_strip(label)
+    has_break_opportunity <- length(tokens) > 1
+
+    should_keep_single_line <- single_line_size >= min_font_size && nchar(label) <= target_width * 0.9
+    if (should_keep_single_line) {
+      return(label)
+    }
+
+    if (!has_break_opportunity) {
+      return(label)
+    }
+
+    token_count <- length(tokens)
+    max_breaks <- min(max_lines - 1, token_count - 1)
+
+    if (max_breaks <= 0) {
+      return(label)
+    }
+
+    best_label <- label
+    best_score <- Inf
+
+    for (break_count in seq_len(max_breaks)) {
+      break_sets <- combn(token_count - 1, break_count, simplify = FALSE)
+
+      for (breaks in break_sets) {
+        starts <- c(1, breaks + 1)
+        ends <- c(breaks, token_count)
+        lines <- purrr::map2_chr(starts, ends, ~ paste(tokens[.x:.y], collapse = " ")) %>%
+          stringr::str_replace_all("\\s+([+_-])$", "\\1")
+        longest_line <- max(nchar(lines), na.rm = TRUE)
+        wrapped_size <- base_font_size * target_width / max(1, longest_line)
+
+        if (wrapped_size < min_font_size && wrapped_size <= single_line_size) {
+          next
+        }
+
+        score <- sum((target_width - nchar(lines))^2) + break_count * 8 - wrapped_size * 6
+
+        if (score < best_score) {
+          best_score <- score
+          best_label <- paste(lines, collapse = "\n")
+        }
+      }
+    }
+
+    best_label
+  }
+
+  label_line_width <- function(label) {
+    lines <- stringr::str_split(as.character(label), "\n", simplify = FALSE)[[1]]
+    max(nchar(lines), na.rm = TRUE)
+  }
+
+  candidate_labels <- purrr::map(
+    1:3,
+    ~ purrr::map_chr(
+      method_labels,
+      render_method_strip_label,
+      target_width = target_line_chars,
+      min_font_size = min_strip_size,
+      base_font_size = base_strip_size,
+      max_lines = .x
+    )
+  )
+  candidate_longest_lines <- purrr::map_dbl(candidate_labels, ~ max(purrr::map_int(.x, label_line_width), na.rm = TRUE))
+  candidate_sizes <- purrr::map_dbl(
+    candidate_longest_lines,
+    ~ min(base_strip_size, base_strip_size * target_line_chars / max(1, .x))
+  )
+  chosen_idx <- which(candidate_sizes >= min_strip_size)[1]
+  allow_below_min_strip_size <- is.na(chosen_idx)
+  if (is.na(chosen_idx)) {
+    chosen_idx <- which.max(candidate_sizes)
+  }
+
+  rendered_method_labels <- candidate_labels[[chosen_idx]]
+  longest_rendered_line <- candidate_longest_lines[[chosen_idx]]
+  strip_text_size <- min(base_strip_size, base_strip_size * target_line_chars / max(1, longest_rendered_line))
+  if (!allow_below_min_strip_size) {
+    strip_text_size <- max(min_strip_size, strip_text_size)
+  }
+
+  point_df <- point_df %>%
+    dplyr::mutate(
+      focal_method_display = factor(
+        rendered_method_labels[match(as.character(.data$focal_method), method_labels)],
+        levels = rendered_method_labels
+      )
+    )
+
+  ggplot2::ggplot(
+    point_df,
+    ggplot2::aes(x = .data$cluster_barcode_jaccard, y = .data$cluster_marker_jaccard)
+  ) +
+    ggplot2::geom_point(
+      size = if (for_pdf) 1.5 else 1.3,
+      alpha = if (for_pdf) 0.58 else 0.5,
+      color = "dodgerblue4"
+    ) +
+    ggplot2::facet_wrap(~ focal_method_display, ncol = facet_cols) +
+    ggplot2::scale_x_continuous(limits = c(0, 1)) +
+    ggplot2::scale_y_continuous(limits = c(0, 1)) +
+    ggplot2::labs(
+      x = "Cluster barcode sharing Jaccard similarity",
+      y = "Cluster marker gene sharing Jaccard similarity"
+    ) +
+    ggplot2::theme_bw(base_size = if (for_pdf) 12 else 11) +
+    ggplot2::theme(
+      panel.grid.minor = ggplot2::element_blank(),
+      strip.background = ggplot2::element_rect(fill = "grey95"),
+      strip.text = ggplot2::element_text(
+        face = "bold",
+        size = strip_text_size,
+        hjust = 0.5,
+        vjust = 0.5,
+        lineheight = 0.95,
+        margin = ggplot2::margin(5, 0, 5, 0)
       )
     )
 }
