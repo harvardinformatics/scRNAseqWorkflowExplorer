@@ -490,182 +490,45 @@ marker_gene_jaccard_heatmap_plot <- function(markers1, markers2,
     )
 }
 
-cluster_vs_marker_jaccard_plot <- function(meta_list, marker_tables, method_labels,
-                                           padj_threshold = 0.05,
-                                           for_pdf = FALSE,
-                                           max_columns = 3) {
-  if (length(meta_list) != length(marker_tables) || length(meta_list) != length(method_labels)) {
-    stop("`meta_list`, `marker_tables`, and `method_labels` must have the same length.")
-  }
+calculate_cluster_vs_marker_jaccard_df <- function(meta1, meta2, markers1, markers2,
+                                                    padj_threshold = 0.05) {
+  cluster_df <- calculate_cluster_jaccard_df(meta1, meta2) %>%
+    dplyr::mutate(cluster1 = as.character(.data$cluster1), cluster2 = as.character(.data$cluster2))
+  marker_df <- calculate_marker_gene_jaccard_df(markers1, markers2, padj_threshold = padj_threshold) %>%
+    dplyr::mutate(cluster1 = as.character(.data$cluster1), cluster2 = as.character(.data$cluster2))
 
-  if (length(meta_list) < 2) {
-    stop("At least two methods are required.")
-  }
-
-  pair_indices <- utils::combn(seq_along(method_labels), 2, simplify = FALSE)
-  point_df <- purrr::map_dfr(pair_indices, function(idx) {
-    i <- idx[[1]]
-    j <- idx[[2]]
-
-    cluster_df <- calculate_cluster_jaccard_df(meta_list[[i]], meta_list[[j]]) %>%
-      dplyr::mutate(cluster1 = as.character(.data$cluster1), cluster2 = as.character(.data$cluster2))
-    marker_df <- calculate_marker_gene_jaccard_df(marker_tables[[i]], marker_tables[[j]], padj_threshold = padj_threshold) %>%
-      dplyr::mutate(cluster1 = as.character(.data$cluster1), cluster2 = as.character(.data$cluster2))
-
-    merged <- dplyr::inner_join(
-      cluster_df %>% dplyr::rename(cluster_barcode_jaccard = "jaccard_similarity"),
-      marker_df %>% dplyr::rename(
-        cluster_marker_jaccard = "jaccard_similarity",
-        shared_marker_genes = "shared_marker_genes"
-      ),
-      by = c("cluster1", "cluster2")
-    )
-
-    dplyr::bind_rows(
-      merged %>% dplyr::mutate(focal_method = method_labels[[i]], other_method = method_labels[[j]]),
-      merged %>%
-        dplyr::transmute(
-          cluster1 = .data$cluster2,
-          cluster2 = .data$cluster1,
-          cluster_barcode_jaccard = .data$cluster_barcode_jaccard,
-          cluster_marker_jaccard = .data$cluster_marker_jaccard,
-          shared_marker_genes = .data$shared_marker_genes,
-          focal_method = method_labels[[j]],
-          other_method = method_labels[[i]]
-        )
-    )
-  })
+  point_df <- dplyr::inner_join(
+    cluster_df %>% dplyr::rename(cluster_barcode_jaccard = "jaccard_similarity"),
+    marker_df %>% dplyr::rename(
+      cluster_marker_jaccard = "jaccard_similarity",
+      shared_marker_genes = "shared_marker_genes"
+    ),
+    by = c("cluster1", "cluster2")
+  )
 
   if (nrow(point_df) == 0) {
-    stop("No matched cluster-pair Jaccard similarities were available across the selected methods.")
+    stop("No matched cluster-pair Jaccard similarities were available for the selected methods.")
   }
 
-  n_methods <- length(method_labels)
-  facet_cols <- max(1, min(max_columns, n_methods))
-  base_strip_size <- if (for_pdf) 11 else 10
-  min_strip_size <- if (for_pdf) 8.5 else 8
-  target_line_chars <- max(22, floor(if (for_pdf) 56 / facet_cols else 50 / facet_cols))
+  point_df
+}
 
-  render_method_strip_label <- function(label, target_width, min_font_size, base_font_size, max_lines = 3) {
-    label <- stringr::str_squish(as.character(label))
-
-    if (!nzchar(label)) {
-      return(label)
-    }
-
-    split_for_strip <- function(text) {
-      text %>%
-        stringr::str_replace_all("([+_-])", "\\1 ") %>%
-        stringr::str_squish() %>%
-        stringr::str_split("\\s+", simplify = FALSE) %>%
-        purrr::pluck(1)
-    }
-
-    single_line_size <- base_font_size * target_width / max(1, nchar(label))
-    tokens <- split_for_strip(label)
-    has_break_opportunity <- length(tokens) > 1
-
-    should_keep_single_line <- single_line_size >= min_font_size && nchar(label) <= target_width * 0.9
-    if (should_keep_single_line) {
-      return(label)
-    }
-
-    if (!has_break_opportunity) {
-      return(label)
-    }
-
-    token_count <- length(tokens)
-    max_breaks <- min(max_lines - 1, token_count - 1)
-
-    if (max_breaks <= 0) {
-      return(label)
-    }
-
-    best_label <- label
-    best_score <- Inf
-
-    for (break_count in seq_len(max_breaks)) {
-      break_sets <- combn(token_count - 1, break_count, simplify = FALSE)
-
-      for (breaks in break_sets) {
-        starts <- c(1, breaks + 1)
-        ends <- c(breaks, token_count)
-        lines <- purrr::map2_chr(starts, ends, ~ paste(tokens[.x:.y], collapse = " ")) %>%
-          stringr::str_replace_all("\\s+([+_-])$", "\\1")
-        longest_line <- max(nchar(lines), na.rm = TRUE)
-        wrapped_size <- base_font_size * target_width / max(1, longest_line)
-
-        if (wrapped_size < min_font_size && wrapped_size <= single_line_size) {
-          next
-        }
-
-        score <- sum((target_width - nchar(lines))^2) + break_count * 8 - wrapped_size * 6
-
-        if (score < best_score) {
-          best_score <- score
-          best_label <- paste(lines, collapse = "\n")
-        }
-      }
-    }
-
-    best_label
-  }
-
-  label_line_width <- function(label) {
-    lines <- stringr::str_split(as.character(label), "\n", simplify = FALSE)[[1]]
-    max(nchar(lines), na.rm = TRUE)
-  }
-
-  candidate_labels <- purrr::map(
-    1:3,
-    ~ purrr::map_chr(
-      method_labels,
-      render_method_strip_label,
-      target_width = target_line_chars,
-      min_font_size = min_strip_size,
-      base_font_size = base_strip_size,
-      max_lines = .x
-    )
-  )
-  candidate_longest_lines <- purrr::map_dbl(candidate_labels, ~ max(purrr::map_int(.x, label_line_width), na.rm = TRUE))
-  candidate_sizes <- purrr::map_dbl(
-    candidate_longest_lines,
-    ~ min(base_strip_size, base_strip_size * target_line_chars / max(1, .x))
-  )
-  chosen_idx <- which(candidate_sizes >= min_strip_size)[1]
-  allow_below_min_strip_size <- is.na(chosen_idx)
-  if (is.na(chosen_idx)) {
-    chosen_idx <- which.max(candidate_sizes)
-  }
-
-  rendered_method_labels <- candidate_labels[[chosen_idx]]
-  longest_rendered_line <- candidate_longest_lines[[chosen_idx]]
-  strip_text_size <- min(base_strip_size, base_strip_size * target_line_chars / max(1, longest_rendered_line))
-  if (!allow_below_min_strip_size) {
-    strip_text_size <- max(min_strip_size, strip_text_size)
-  }
-
-  threshold_note_key <- "threshold_note"
-  threshold_note_label <- bquote(
-    atop(
-      "Marker genes defined with",
-      paste("BH adj. p-value " <= .(format(padj_threshold, trim = TRUE)))
-    )
-  )
-  legend_note_df <- tibble::tibble(
-    focal_method_display = rendered_method_labels[[1]],
-    cluster_barcode_jaccard = 0,
-    cluster_marker_jaccard = 0,
-    threshold_note = threshold_note_key
+cluster_vs_marker_jaccard_plot <- function(meta1, meta2, markers1, markers2,
+                                           name1, name2,
+                                           padj_threshold = 0.05,
+                                           for_pdf = FALSE) {
+  point_df <- calculate_cluster_vs_marker_jaccard_df(
+    meta1 = meta1,
+    meta2 = meta2,
+    markers1 = markers1,
+    markers2 = markers2,
+    padj_threshold = padj_threshold
   )
 
-  point_df <- point_df %>%
-    dplyr::mutate(
-      focal_method_display = factor(
-        rendered_method_labels[match(as.character(.data$focal_method), method_labels)],
-        levels = rendered_method_labels
-      )
-    )
+  plot_title <- stringr::str_wrap(
+    paste0("Cluster barcode vs marker gene similarity: ", name1, " vs ", name2),
+    width = if (for_pdf) 88 else 74
+  )
 
   ggplot2::ggplot(
     point_df,
@@ -680,7 +543,6 @@ cluster_vs_marker_jaccard_plot <- function(meta_list, marker_tables, method_labe
       alpha = if (for_pdf) 0.58 else 0.5,
       show.legend = TRUE
     ) +
-    ggplot2::facet_wrap(~ focal_method_display, ncol = facet_cols) +
     ggplot2::scale_x_continuous(limits = c(0, 1)) +
     ggplot2::scale_y_continuous(limits = c(0, 1)) +
     ggplot2::scale_color_gradient(
@@ -688,39 +550,18 @@ cluster_vs_marker_jaccard_plot <- function(meta_list, marker_tables, method_labe
       low = "dodgerblue",
       high = "firebrick"
     ) +
-    ggplot2::geom_point(
-      data = legend_note_df,
-      ggplot2::aes(x = .data$cluster_barcode_jaccard, y = .data$cluster_marker_jaccard, alpha = .data$threshold_note),
-      inherit.aes = FALSE,
-      shape = 16,
-      size = 0,
-      show.legend = TRUE
-    ) +
-    ggplot2::scale_alpha_manual(
-      values = stats::setNames(0, threshold_note_key),
-      labels = list(threshold_note_label),
-      guide = ggplot2::guide_legend(
-        order = 2,
-        title = NULL,
-        override.aes = list(alpha = 0, size = 0)
-      )
-    ) +
     ggplot2::labs(
+      title = plot_title,
+      subtitle = paste0("Marker genes defined with BH adjusted p-value <= ", format(padj_threshold, trim = TRUE)),
       x = "Cluster barcode sharing Jaccard similarity",
       y = "Cluster marker gene sharing Jaccard similarity"
     ) +
+    ggplot2::coord_equal() +
     ggplot2::theme_bw(base_size = if (for_pdf) 12 else 11) +
     ggplot2::theme(
       panel.grid.minor = ggplot2::element_blank(),
-      strip.background = ggplot2::element_rect(fill = "grey95"),
-      strip.text = ggplot2::element_text(
-        face = "bold",
-        size = strip_text_size,
-        hjust = 0.5,
-        vjust = 0.5,
-        lineheight = 0.95,
-        margin = ggplot2::margin(5, 0, 5, 0)
-      ),
+      plot.title = ggplot2::element_text(face = "bold", size = if (for_pdf) 13 else 12),
+      plot.subtitle = ggplot2::element_text(size = if (for_pdf) 10.5 else 9.5),
       legend.position = "right",
       legend.title.align = 0,
       legend.text.align = 0,
@@ -728,17 +569,7 @@ cluster_vs_marker_jaccard_plot <- function(meta_list, marker_tables, method_labe
       legend.spacing.y = grid::unit(6, "pt")
     ) +
     ggplot2::guides(
-      color = ggplot2::guide_colorbar(order = 1),
-      alpha = ggplot2::guide_legend(
-        order = 2,
-        title = NULL,
-        label.hjust = 0,
-        keywidth = grid::unit(0, "pt"),
-        keyheight = grid::unit(0, "pt"),
-        label.theme = ggplot2::element_text(hjust = 0, margin = ggplot2::margin(l = -8)),
-        default.unit = "pt",
-        override.aes = list(alpha = 0, size = 0)
-      )
+      color = ggplot2::guide_colorbar(order = 1)
     )
 }
 

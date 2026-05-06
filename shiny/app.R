@@ -776,7 +776,9 @@ ui <- fluidPage(
       sidebarLayout(
         sidebarPanel(
           width = 4,
-          helpText("Across all selected methods, compare cluster barcode-sharing Jaccard similarities to marker-gene-sharing Jaccard similarities on matched cluster pairs."),
+          helpText("Select two methods and compare cluster barcode-sharing Jaccard similarities to marker-gene-sharing Jaccard similarities on matched cluster pairs."),
+          selectInput("cluster_vs_marker_method1", "Method 1", choices = c("Choose a method" = "")),
+          selectInput("cluster_vs_marker_method2", "Method 2", choices = c("Choose a method" = "")),
           numericInput(
             "cluster_vs_marker_padj_threshold",
             "Benjamini-Hochberg adjusted p-value threshold",
@@ -1036,6 +1038,15 @@ server <- function(input, output, session) {
       selected_marker_jaccard_method1 <- if (!is.null(current_marker_jaccard_method1) && current_marker_jaccard_method1 %in% pairs$rds) current_marker_jaccard_method1 else ""
       selected_marker_jaccard_method2 <- if (!is.null(current_marker_jaccard_method2) && current_marker_jaccard_method2 %in% pairs$rds) current_marker_jaccard_method2 else ""
 
+      current_cluster_vs_marker_method1 <- isolate(input$cluster_vs_marker_method1)
+      current_cluster_vs_marker_method2 <- isolate(input$cluster_vs_marker_method2)
+      selected_cluster_vs_marker_method1 <- if (!is.null(current_cluster_vs_marker_method1) && current_cluster_vs_marker_method1 %in% pairs$rds) current_cluster_vs_marker_method1 else pairs$rds[[1]]
+      fallback_cluster_vs_marker_method2 <- if (nrow(pairs) >= 2) pairs$rds[[2]] else ""
+      selected_cluster_vs_marker_method2 <- if (!is.null(current_cluster_vs_marker_method2) && current_cluster_vs_marker_method2 %in% pairs$rds) current_cluster_vs_marker_method2 else fallback_cluster_vs_marker_method2
+      if (identical(selected_cluster_vs_marker_method1, selected_cluster_vs_marker_method2) && nrow(pairs) >= 2) {
+        selected_cluster_vs_marker_method2 <- pairs$rds[[which(pairs$rds != selected_cluster_vs_marker_method1)[1]]]
+      }
+
       current_silhouette_biplot_method1 <- isolate(input$silhouette_biplot_method1)
       current_silhouette_biplot_method2 <- isolate(input$silhouette_biplot_method2)
       selected_silhouette_biplot_method1 <- if (!is.null(current_silhouette_biplot_method1) && current_silhouette_biplot_method1 %in% pairs$rds) current_silhouette_biplot_method1 else ""
@@ -1047,6 +1058,8 @@ server <- function(input, output, session) {
       updateSelectInput(session, "jaccard_method2", choices = choice_map, selected = selected_jaccard_method2)
       updateSelectInput(session, "marker_jaccard_method1", choices = choice_map_with_blank, selected = selected_marker_jaccard_method1)
       updateSelectInput(session, "marker_jaccard_method2", choices = choice_map_with_blank, selected = selected_marker_jaccard_method2)
+      updateSelectInput(session, "cluster_vs_marker_method1", choices = choice_map_with_blank, selected = selected_cluster_vs_marker_method1)
+      updateSelectInput(session, "cluster_vs_marker_method2", choices = choice_map_with_blank, selected = selected_cluster_vs_marker_method2)
       updateSelectInput(session, "silhouette_biplot_method1", choices = choice_map_with_blank, selected = selected_silhouette_biplot_method1)
       updateSelectInput(session, "silhouette_biplot_method2", choices = choice_map_with_blank, selected = selected_silhouette_biplot_method2)
     } else {
@@ -1056,6 +1069,8 @@ server <- function(input, output, session) {
       updateSelectInput(session, "jaccard_method2", choices = c())
       updateSelectInput(session, "marker_jaccard_method1", choices = c("Choose a method" = ""), selected = "")
       updateSelectInput(session, "marker_jaccard_method2", choices = c("Choose a method" = ""), selected = "")
+      updateSelectInput(session, "cluster_vs_marker_method1", choices = c("Choose a method" = ""), selected = "")
+      updateSelectInput(session, "cluster_vs_marker_method2", choices = c("Choose a method" = ""), selected = "")
       updateSelectInput(session, "silhouette_biplot_method1", choices = c())
       updateSelectInput(session, "silhouette_biplot_method2", choices = c())
     }
@@ -1286,6 +1301,35 @@ server <- function(input, output, session) {
     )
   })
 
+  loaded_cluster_vs_marker_data <- reactive({
+    method1 <- input$cluster_vs_marker_method1
+    method2 <- input$cluster_vs_marker_method2
+    if (is.null(method1)) method1 <- ""
+    if (is.null(method2)) method2 <- ""
+
+    validate(
+      need(nzchar(method1) && nzchar(method2), "Pick two methods."),
+      need(method1 != method2, "Pick two different methods."),
+      need(file.exists(method1), "Method 1 file does not exist."),
+      need(file.exists(method2), "Method 2 file does not exist.")
+    )
+
+    marker1 <- infer_marker_gene_path(method1)
+    marker2 <- infer_marker_gene_path(method2)
+
+    validate(
+      need(file.exists(marker1), paste("Missing marker-gene CSV for method 1:", basename(marker1))),
+      need(file.exists(marker2), paste("Missing marker-gene CSV for method 2:", basename(marker2)))
+    )
+
+    list(
+      meta1 = read_seurat_cluster_meta(method1),
+      meta2 = read_seurat_cluster_meta(method2),
+      markers1 = read_marker_gene_csv(marker1),
+      markers2 = read_marker_gene_csv(marker2)
+    )
+  })
+
   all_marker_gene_method_data <- reactive({
     rds_paths <- seurat_object_paths()
     label_map <- method_labels()
@@ -1313,15 +1357,6 @@ server <- function(input, output, session) {
         label = resolve_method_label(label_map, rds_path),
         markers = read_marker_gene_csv(marker_path)
       )
-    })
-  })
-
-  all_cluster_and_marker_method_data <- reactive({
-    marker_methods <- all_marker_gene_method_data()
-
-    purrr::map(marker_methods, function(method) {
-      method$meta <- read_seurat_cluster_meta(method$rds)
-      method
     })
   })
 
@@ -1407,6 +1442,8 @@ server <- function(input, output, session) {
       updateSelectInput(session, "jaccard_method2", choices = c())
       updateSelectInput(session, "marker_jaccard_method1", choices = c("Choose a method" = ""), selected = "")
       updateSelectInput(session, "marker_jaccard_method2", choices = c("Choose a method" = ""), selected = "")
+      updateSelectInput(session, "cluster_vs_marker_method1", choices = c("Choose a method" = ""), selected = "")
+      updateSelectInput(session, "cluster_vs_marker_method2", choices = c("Choose a method" = ""), selected = "")
       updateSelectInput(session, "silhouette_biplot_method1", choices = c("Choose a method" = ""), selected = "")
       updateSelectInput(session, "silhouette_biplot_method2", choices = c("Choose a method" = ""), selected = "")
       return()
@@ -1420,12 +1457,26 @@ server <- function(input, output, session) {
       )
     )
 
+    selected_cluster_vs_marker_method1 <- isolate(input$cluster_vs_marker_method1)
+    selected_cluster_vs_marker_method2 <- isolate(input$cluster_vs_marker_method2)
+    if (is.null(selected_cluster_vs_marker_method1) || !(selected_cluster_vs_marker_method1 %in% pairs$rds)) {
+      selected_cluster_vs_marker_method1 <- pairs$rds[[1]]
+    }
+    if (is.null(selected_cluster_vs_marker_method2) || !(selected_cluster_vs_marker_method2 %in% pairs$rds)) {
+      selected_cluster_vs_marker_method2 <- if (nrow(pairs) >= 2) pairs$rds[[2]] else ""
+    }
+    if (identical(selected_cluster_vs_marker_method1, selected_cluster_vs_marker_method2) && nrow(pairs) >= 2) {
+      selected_cluster_vs_marker_method2 <- pairs$rds[[which(pairs$rds != selected_cluster_vs_marker_method1)[1]]]
+    }
+
     updateSelectInput(session, "method1", choices = c("Choose a method" = "", choice_map), selected = isolate(input$method1))
     updateSelectInput(session, "method2", choices = c("Choose a method" = "", choice_map), selected = isolate(input$method2))
     updateSelectInput(session, "jaccard_method1", choices = choice_map, selected = isolate(input$jaccard_method1))
     updateSelectInput(session, "jaccard_method2", choices = choice_map, selected = isolate(input$jaccard_method2))
     updateSelectInput(session, "marker_jaccard_method1", choices = c("Choose a method" = "", choice_map), selected = isolate(input$marker_jaccard_method1))
     updateSelectInput(session, "marker_jaccard_method2", choices = c("Choose a method" = "", choice_map), selected = isolate(input$marker_jaccard_method2))
+    updateSelectInput(session, "cluster_vs_marker_method1", choices = c("Choose a method" = "", choice_map), selected = selected_cluster_vs_marker_method1)
+    updateSelectInput(session, "cluster_vs_marker_method2", choices = c("Choose a method" = "", choice_map), selected = selected_cluster_vs_marker_method2)
     updateSelectInput(session, "silhouette_biplot_method1", choices = c("Choose a method" = "", choice_map), selected = isolate(input$silhouette_biplot_method1))
     updateSelectInput(session, "silhouette_biplot_method2", choices = c("Choose a method" = "", choice_map), selected = isolate(input$silhouette_biplot_method2))
   })
@@ -1643,18 +1694,19 @@ server <- function(input, output, session) {
     }
 
     capture_condition_message({
-      methods <- all_cluster_and_marker_method_data()
-
-      validate(
-        need(length(methods) >= 2, "At least two selected methods are required.")
-      )
+      dat <- loaded_cluster_vs_marker_data()
+      label_map <- method_labels()
+      label1 <- resolve_method_label(label_map, input$cluster_vs_marker_method1)
+      label2 <- resolve_method_label(label_map, input$cluster_vs_marker_method2)
 
       cluster_vs_marker_jaccard_plot(
-        meta_list = purrr::map(methods, "meta"),
-        marker_tables = purrr::map(methods, "markers"),
-        method_labels = purrr::map_chr(methods, "label"),
-        padj_threshold = input$cluster_vs_marker_padj_threshold,
-        max_columns = 3
+        meta1 = dat$meta1,
+        meta2 = dat$meta2,
+        markers1 = dat$markers1,
+        markers2 = dat$markers2,
+        name1 = label1,
+        name2 = label2,
+        padj_threshold = input$cluster_vs_marker_padj_threshold
       )
     })$error
   })
@@ -1758,22 +1810,7 @@ server <- function(input, output, session) {
   })
 
   output$cluster_vs_marker_plot_ui <- renderUI({
-    methods <- all_cluster_and_marker_method_data()
-    facet_cols <- min(3L, max(1L, length(methods)))
-    facet_rows <- if (length(methods) == 0) 1L else ceiling(length(methods) / facet_cols)
-    plot_height_px <- max(620L, 290L * facet_rows)
-    viewport_height_px <- min(900L, plot_height_px)
-
-    shiny::div(
-      style = paste0(
-        "max-height:", viewport_height_px, "px;",
-        "overflow-y:auto; overflow-x:hidden; border:1px solid #ddd; padding:6px 8px 0 0;"
-      ),
-      plotOutput(
-        "cluster_vs_marker_plot",
-        height = paste0(plot_height_px, "px")
-      )
-    )
+    plotOutput("cluster_vs_marker_plot", height = "620px")
   })
 
   output$silhouette_biplot_error <- renderUI({
@@ -1922,14 +1959,19 @@ server <- function(input, output, session) {
 
   output$cluster_vs_marker_plot <- renderPlot({
     req(is.null(cluster_vs_marker_error_message()))
-    methods <- all_cluster_and_marker_method_data()
+    dat <- loaded_cluster_vs_marker_data()
+    label_map <- method_labels()
+    label1 <- resolve_method_label(label_map, input$cluster_vs_marker_method1)
+    label2 <- resolve_method_label(label_map, input$cluster_vs_marker_method2)
 
     cluster_vs_marker_jaccard_plot(
-      meta_list = purrr::map(methods, "meta"),
-      marker_tables = purrr::map(methods, "markers"),
-      method_labels = purrr::map_chr(methods, "label"),
-      padj_threshold = input$cluster_vs_marker_padj_threshold,
-      max_columns = 3
+      meta1 = dat$meta1,
+      meta2 = dat$meta2,
+      markers1 = dat$markers1,
+      markers2 = dat$markers2,
+      name1 = label1,
+      name2 = label2,
+      padj_threshold = input$cluster_vs_marker_padj_threshold
     )
   }, res = 110)
 
@@ -2068,29 +2110,24 @@ server <- function(input, output, session) {
       paste0("cluster-barcode-vs-marker-similarity-", format(Sys.Date(), "%Y%m%d"), ".pdf")
     },
     content = function(file) {
-      methods <- all_cluster_and_marker_method_data()
-
-      validate(
-        need(length(methods) >= 2, "At least two selected methods are required.")
-      )
-
-      page_method_count <- 9L
-      page_indices <- split(seq_along(methods), ceiling(seq_along(methods) / page_method_count))
+      dat <- loaded_cluster_vs_marker_data()
+      label_map <- method_labels()
+      label1 <- resolve_method_label(label_map, input$cluster_vs_marker_method1)
+      label2 <- resolve_method_label(label_map, input$cluster_vs_marker_method2)
 
       grDevices::pdf(file, width = 10, height = 7.5, onefile = TRUE)
       on.exit(grDevices::dev.off(), add = TRUE)
 
-      purrr::walk(page_indices, function(idx) {
-        page_methods <- methods[idx]
-        print(cluster_vs_marker_jaccard_plot(
-          meta_list = purrr::map(page_methods, "meta"),
-          marker_tables = purrr::map(page_methods, "markers"),
-          method_labels = purrr::map_chr(page_methods, "label"),
-          padj_threshold = input$cluster_vs_marker_padj_threshold,
-          for_pdf = TRUE,
-          max_columns = 3
-        ))
-      })
+      print(cluster_vs_marker_jaccard_plot(
+        meta1 = dat$meta1,
+        meta2 = dat$meta2,
+        markers1 = dat$markers1,
+        markers2 = dat$markers2,
+        name1 = label1,
+        name2 = label2,
+        padj_threshold = input$cluster_vs_marker_padj_threshold,
+        for_pdf = TRUE
+      ))
     }
   )
 
@@ -2500,28 +2537,26 @@ server <- function(input, output, session) {
       return(paste0("Full error message:\n", cluster_vs_marker_error_message()))
     }
 
-    methods <- all_cluster_and_marker_method_data()
-    pair_indices <- utils::combn(seq_along(methods), 2, simplify = FALSE)
-    point_total <- purrr::map_int(pair_indices, function(idx) {
-      cluster_df <- calculate_cluster_jaccard_df(methods[[idx[[1]]]]$meta, methods[[idx[[2]]]]$meta) %>%
-        dplyr::mutate(cluster1 = as.character(.data$cluster1), cluster2 = as.character(.data$cluster2))
-      marker_df <- calculate_marker_gene_jaccard_df(
-        methods[[idx[[1]]]]$markers,
-        methods[[idx[[2]]]]$markers,
-        padj_threshold = input$cluster_vs_marker_padj_threshold
-      ) %>%
-        dplyr::mutate(cluster1 = as.character(.data$cluster1), cluster2 = as.character(.data$cluster2))
-
-      nrow(dplyr::inner_join(cluster_df, marker_df, by = c("cluster1", "cluster2")))
-    }) %>%
-      sum()
+    dat <- loaded_cluster_vs_marker_data()
+    label_map <- method_labels()
+    label1 <- resolve_method_label(label_map, input$cluster_vs_marker_method1)
+    label2 <- resolve_method_label(label_map, input$cluster_vs_marker_method2)
+    point_total <- nrow(calculate_cluster_vs_marker_jaccard_df(
+      meta1 = dat$meta1,
+      meta2 = dat$meta2,
+      markers1 = dat$markers1,
+      markers2 = dat$markers2,
+      padj_threshold = input$cluster_vs_marker_padj_threshold
+    ))
 
     paste0(
-      "Loaded ",
-      length(methods),
-      " methods. The plot includes ",
+      "Comparing ",
+      label1,
+      " vs ",
+      label2,
+      ". The plot includes ",
       point_total,
-      " matched cluster-pair similarity points across all pairwise method comparisons. Benjamini-Hochberg adjusted p-value threshold: ",
+      " matched cluster-pair similarity points. Benjamini-Hochberg adjusted p-value threshold: ",
       format(input$cluster_vs_marker_padj_threshold, trim = TRUE),
       "."
     )
