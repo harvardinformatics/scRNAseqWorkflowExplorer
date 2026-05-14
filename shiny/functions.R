@@ -153,23 +153,21 @@ arrange_cluster_levels <- function(cluster_values) {
   }
 }
 
-jaccard_heatmap_plot <- function(meta1, meta2,
-                                 name1, name2, threshold = 0.6,
-                                 for_pdf = FALSE) {
+calculate_cluster_jaccard_df <- function(meta1, meta2) {
   clusters1 <- tibble::tibble(
     cellbarcode = rownames(meta1),
-    clusterid1 = as.character(meta1$seurat_clusters)
+    cluster1 = as.character(meta1$seurat_clusters)
   )
 
   clusters2 <- tibble::tibble(
     cellbarcode = rownames(meta2),
-    clusterid2 = as.character(meta2$seurat_clusters)
+    cluster2 = as.character(meta2$seurat_clusters)
   )
 
   clusters_merged <- dplyr::full_join(clusters1, clusters2, by = "cellbarcode")
 
-  indices1 <- split(seq_len(nrow(clusters_merged)), clusters_merged$clusterid1)
-  indices2 <- split(seq_len(nrow(clusters_merged)), clusters_merged$clusterid2)
+  indices1 <- split(seq_len(nrow(clusters_merged)), clusters_merged$cluster1)
+  indices2 <- split(seq_len(nrow(clusters_merged)), clusters_merged$cluster2)
 
   indices1 <- indices1[!is.na(names(indices1))]
   indices2 <- indices2[!is.na(names(indices2))]
@@ -197,6 +195,101 @@ jaccard_heatmap_plot <- function(meta1, meta2,
     jaccard_df$cluster2,
     levels = arrange_cluster_levels(as.character(jaccard_df$cluster2))
   )
+
+  tibble::as_tibble(jaccard_df)
+}
+
+calculate_marker_gene_jaccard_df <- function(markers1, markers2, padj_threshold = 0.05) {
+  if (!is.numeric(padj_threshold) || length(padj_threshold) != 1 || is.na(padj_threshold) || padj_threshold < 0) {
+    stop("`padj_threshold` must be a single number greater than or equal to 0.")
+  }
+
+  marker_sets1 <- markers1 %>%
+    dplyr::mutate(
+      cluster = as.character(.data$cluster),
+      genesymbol = as.character(.data$genesymbol),
+      p_val_adj = suppressWarnings(as.numeric(.data$p_val_adj)),
+      avg_log2fc = suppressWarnings(as.numeric(.data$avg_log2fc)),
+      direction = dplyr::case_when(
+        !is.na(.data$avg_log2fc) & .data$avg_log2fc > 0 ~ "up",
+        !is.na(.data$avg_log2fc) & .data$avg_log2fc < 0 ~ "down",
+        TRUE ~ NA_character_
+      )
+    ) %>%
+    dplyr::filter(
+      !is.na(.data$cluster), !is.na(.data$genesymbol), nzchar(.data$cluster), nzchar(.data$genesymbol),
+      !is.na(.data$p_val_adj), .data$p_val_adj <= padj_threshold, !is.na(.data$direction)
+    ) %>%
+    dplyr::distinct(.data$cluster, .data$genesymbol, .data$direction) %>%
+    dplyr::group_by(.data$cluster) %>%
+    dplyr::summarise(
+      genes = list(unique(.data$genesymbol)),
+      directed_genes = list(unique(paste(.data$genesymbol, .data$direction, sep = "::"))),
+      .groups = "drop"
+    )
+
+  marker_sets2 <- markers2 %>%
+    dplyr::mutate(
+      cluster = as.character(.data$cluster),
+      genesymbol = as.character(.data$genesymbol),
+      p_val_adj = suppressWarnings(as.numeric(.data$p_val_adj)),
+      avg_log2fc = suppressWarnings(as.numeric(.data$avg_log2fc)),
+      direction = dplyr::case_when(
+        !is.na(.data$avg_log2fc) & .data$avg_log2fc > 0 ~ "up",
+        !is.na(.data$avg_log2fc) & .data$avg_log2fc < 0 ~ "down",
+        TRUE ~ NA_character_
+      )
+    ) %>%
+    dplyr::filter(
+      !is.na(.data$cluster), !is.na(.data$genesymbol), nzchar(.data$cluster), nzchar(.data$genesymbol),
+      !is.na(.data$p_val_adj), .data$p_val_adj <= padj_threshold, !is.na(.data$direction)
+    ) %>%
+    dplyr::distinct(.data$cluster, .data$genesymbol, .data$direction) %>%
+    dplyr::group_by(.data$cluster) %>%
+    dplyr::summarise(
+      genes = list(unique(.data$genesymbol)),
+      directed_genes = list(unique(paste(.data$genesymbol, .data$direction, sep = "::"))),
+      .groups = "drop"
+    )
+
+  if (nrow(marker_sets1) == 0 || nrow(marker_sets2) == 0) {
+    stop("No non-empty cluster marker-gene sets were found for one or both selected methods.")
+  }
+
+  jaccard_list <- list()
+  for (i in seq_len(nrow(marker_sets1))) {
+    for (j in seq_len(nrow(marker_sets2))) {
+      union_genes <- union(marker_sets1$genes[[i]], marker_sets2$genes[[j]])
+      intersect_size <- length(intersect(marker_sets1$directed_genes[[i]], marker_sets2$directed_genes[[j]]))
+      similarity <- if (length(union_genes) == 0) 0 else intersect_size / length(union_genes)
+      jaccard_list[[length(jaccard_list) + 1]] <- list(
+        cluster1 = marker_sets1$cluster[[i]],
+        cluster2 = marker_sets2$cluster[[j]],
+        jaccard_similarity = similarity,
+        shared_marker_genes = intersect_size
+      )
+    }
+  }
+
+  jaccard_df <- do.call(rbind, lapply(jaccard_list, as.data.frame))
+  jaccard_df <- type.convert(jaccard_df, as.is = TRUE)
+
+  jaccard_df$cluster1 <- factor(
+    jaccard_df$cluster1,
+    levels = arrange_cluster_levels(as.character(jaccard_df$cluster1))
+  )
+  jaccard_df$cluster2 <- factor(
+    jaccard_df$cluster2,
+    levels = arrange_cluster_levels(as.character(jaccard_df$cluster2))
+  )
+
+  tibble::as_tibble(jaccard_df)
+}
+
+jaccard_heatmap_plot <- function(meta1, meta2,
+                                 name1, name2, threshold = 0.6,
+                                 for_pdf = FALSE) {
+  jaccard_df <- calculate_cluster_jaccard_df(meta1, meta2)
 
   label_df <- jaccard_df %>%
     dplyr::filter(jaccard_similarity >= threshold) %>%
@@ -280,6 +373,378 @@ jaccard_heatmap_plot <- function(meta1, meta2,
         default.unit = "pt",
         override.aes = list(alpha = 0, size = 0)
       )
+    )
+}
+
+marker_gene_jaccard_heatmap_plot <- function(markers1, markers2,
+                                             name1, name2, threshold = 0.2,
+                                             padj_threshold = 0.05,
+                                             for_pdf = FALSE) {
+  required_cols <- c("cluster", "genesymbol", "p_val_adj", "avg_log2fc")
+  missing1 <- setdiff(required_cols, names(markers1))
+  missing2 <- setdiff(required_cols, names(markers2))
+
+  if (length(missing1) > 0) {
+    stop(
+      "Marker-gene table for method `", name1, "` is missing required column",
+      if (length(missing1) > 1) "s: " else ": ",
+      paste0("`", missing1, "`", collapse = ", "),
+      "."
+    )
+  }
+
+  if (length(missing2) > 0) {
+    stop(
+      "Marker-gene table for method `", name2, "` is missing required column",
+      if (length(missing2) > 1) "s: " else ": ",
+      paste0("`", missing2, "`", collapse = ", "),
+      "."
+    )
+  }
+
+  jaccard_df <- calculate_marker_gene_jaccard_df(markers1, markers2, padj_threshold = padj_threshold)
+
+  label_df <- jaccard_df %>%
+    dplyr::filter(jaccard_similarity >= threshold) %>%
+    dplyr::mutate(jaccard_label = if (for_pdf) "*" else format(round(jaccard_similarity, 2), nsmall = 2))
+
+  threshold_note <- paste0(
+    "Marker-gene cluster pairs\n",
+    "Jaccard threshold: ",
+    format(threshold, trim = TRUE),
+    "\nBH adj. p-value ≤ ",
+    format(padj_threshold, trim = TRUE),
+    "\nIntersection counts same-direction genes only"
+  )
+  legend_note_df <- tibble::tibble(
+    cluster1 = levels(jaccard_df$cluster1)[[1]],
+    cluster2 = levels(jaccard_df$cluster2)[[1]],
+    threshold_note = threshold_note
+  )
+
+  ggplot2::ggplot(
+    data = jaccard_df,
+    ggplot2::aes(x = cluster1, y = cluster2, fill = jaccard_similarity)
+  ) +
+    ggplot2::geom_tile(color = "black", linewidth = 0.35) +
+    ggplot2::scale_fill_gradient(
+      low = "white",
+      high = "firebrick",
+      breaks = seq(0, 1, 0.2),
+      limits = c(0, 1)
+    ) +
+    ggplot2::geom_text(
+      data = label_df,
+      ggplot2::aes(label = jaccard_label),
+      size = if (for_pdf) 4.2 else 2.8,
+      color = "black",
+      hjust = 0.5,
+      vjust = if (for_pdf) 0.62 else 0.5
+    ) +
+    ggplot2::geom_point(
+      data = legend_note_df,
+      ggplot2::aes(x = cluster1, y = cluster2, alpha = threshold_note),
+      inherit.aes = FALSE,
+      shape = 15,
+      size = 0,
+      show.legend = TRUE
+    ) +
+    ggplot2::scale_x_discrete(name = name1) +
+    ggplot2::scale_y_discrete(name = name2) +
+    ggplot2::scale_alpha_manual(
+      values = stats::setNames(0, threshold_note),
+      guide = ggplot2::guide_legend(
+        order = 2,
+        title = NULL,
+        override.aes = list(alpha = 0, size = 0)
+      )
+    ) +
+    ggplot2::labs(fill = "Marker-gene Jaccard similarity") +
+    ggplot2::coord_equal() +
+    ggplot2::theme_minimal(base_size = 12) +
+    ggplot2::theme(
+      panel.grid.major = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      panel.background = ggplot2::element_blank(),
+      axis.text.x = ggplot2::element_text(size = if (for_pdf) 9 else 10, angle = 90, vjust = 0.5, hjust = 1),
+      axis.text.y = ggplot2::element_text(size = if (for_pdf) 9 else 10),
+      axis.title.x = ggplot2::element_text(size = if (for_pdf) 11.2 else 14),
+      axis.title.y = ggplot2::element_text(size = if (for_pdf) 11.2 else 14),
+      legend.title.align = 0,
+      legend.text.align = 0,
+      legend.box = "vertical",
+      legend.spacing.y = grid::unit(6, "pt")
+    ) +
+    ggplot2::guides(
+      fill = ggplot2::guide_colorbar(order = 1),
+      alpha = ggplot2::guide_legend(
+        order = 2,
+        title = NULL,
+        label.hjust = 0,
+        keywidth = grid::unit(0, "pt"),
+        keyheight = grid::unit(0, "pt"),
+        label.theme = ggplot2::element_text(hjust = 0, margin = ggplot2::margin(l = -8)),
+        default.unit = "pt",
+        override.aes = list(alpha = 0, size = 0)
+      )
+    )
+}
+
+calculate_cluster_vs_marker_jaccard_df <- function(meta1, meta2, markers1, markers2,
+                                                    padj_threshold = 0.05) {
+  cluster_df <- calculate_cluster_jaccard_df(meta1, meta2) %>%
+    dplyr::mutate(cluster1 = as.character(.data$cluster1), cluster2 = as.character(.data$cluster2))
+  marker_df <- calculate_marker_gene_jaccard_df(markers1, markers2, padj_threshold = padj_threshold) %>%
+    dplyr::mutate(cluster1 = as.character(.data$cluster1), cluster2 = as.character(.data$cluster2))
+
+  point_df <- dplyr::inner_join(
+    cluster_df %>% dplyr::rename(cluster_barcode_jaccard = "jaccard_similarity"),
+    marker_df %>% dplyr::rename(
+      cluster_marker_jaccard = "jaccard_similarity",
+      shared_marker_genes = "shared_marker_genes"
+    ),
+    by = c("cluster1", "cluster2")
+  )
+
+  if (nrow(point_df) == 0) {
+    stop("No matched cluster-pair Jaccard similarities were available for the selected methods.")
+  }
+
+  point_df
+}
+
+cluster_vs_marker_jaccard_plot <- function(meta1, meta2, markers1, markers2,
+                                           name1, name2,
+                                           padj_threshold = 0.05,
+                                           for_pdf = FALSE) {
+  point_df <- calculate_cluster_vs_marker_jaccard_df(
+    meta1 = meta1,
+    meta2 = meta2,
+    markers1 = markers1,
+    markers2 = markers2,
+    padj_threshold = padj_threshold
+  )
+
+  plot_title <- stringr::str_wrap(
+    paste0("Cluster barcode vs marker gene similarity: ", name1, " vs ", name2),
+    width = if (for_pdf) 88 else 74
+  )
+
+  ggplot2::ggplot(
+    point_df,
+    ggplot2::aes(
+      x = .data$cluster_barcode_jaccard,
+      y = .data$cluster_marker_jaccard,
+      color = .data$shared_marker_genes
+    )
+  ) +
+    ggplot2::geom_point(
+      size = if (for_pdf) 1.5 else 1.3,
+      alpha = if (for_pdf) 0.58 else 0.5,
+      show.legend = TRUE
+    ) +
+    ggplot2::scale_x_continuous(limits = c(0, 1)) +
+    ggplot2::scale_y_continuous(limits = c(0, 1)) +
+    ggplot2::scale_color_gradient(
+      name = "Shared marker genes",
+      low = "dodgerblue",
+      high = "firebrick"
+    ) +
+    ggplot2::labs(
+      title = plot_title,
+      subtitle = paste0("Marker genes defined with BH adjusted p-value <= ", format(padj_threshold, trim = TRUE)),
+      x = "Cluster barcode sharing Jaccard similarity",
+      y = "Cluster marker gene sharing Jaccard similarity"
+    ) +
+    ggplot2::coord_equal() +
+    ggplot2::theme_bw(base_size = if (for_pdf) 12 else 11) +
+    ggplot2::theme(
+      panel.grid.minor = ggplot2::element_blank(),
+      plot.title = ggplot2::element_text(face = "bold", size = if (for_pdf) 13 else 12),
+      plot.subtitle = ggplot2::element_text(size = if (for_pdf) 10.5 else 9.5),
+      legend.position = "right",
+      legend.title.align = 0,
+      legend.text.align = 0,
+      legend.box = "vertical",
+      legend.spacing.y = grid::unit(6, "pt")
+    ) +
+    ggplot2::guides(
+      color = ggplot2::guide_colorbar(order = 1)
+    )
+}
+
+marker_gene_specificity_plot <- function(marker_tables, method_labels,
+                                         specificity_mode = "up_specific",
+                                         padj_threshold = 0.05,
+                                         abs_logfc_threshold = 0,
+                                         for_pdf = FALSE) {
+  if (!is.list(marker_tables) || length(marker_tables) == 0) {
+    stop("Provide at least one marker-gene table.")
+  }
+
+  if (length(marker_tables) != length(method_labels)) {
+    stop("`marker_tables` and `method_labels` must have the same length.")
+  }
+
+  if (!is.numeric(padj_threshold) || length(padj_threshold) != 1 || is.na(padj_threshold) || padj_threshold < 0) {
+    stop("`padj_threshold` must be a single number greater than or equal to 0.")
+  }
+
+  if (!is.numeric(abs_logfc_threshold) || length(abs_logfc_threshold) != 1 || is.na(abs_logfc_threshold) || abs_logfc_threshold < 0) {
+    stop("`abs_logfc_threshold` must be a single number greater than or equal to 0.")
+  }
+
+  mode_choices <- c("up_specific", "down_specific", "exclusive_significant")
+  if (!(specificity_mode %in% mode_choices)) {
+    stop("`specificity_mode` must be one of: ", paste(mode_choices, collapse = ", "))
+  }
+
+  required_cols <- c("cluster", "genesymbol", "p_val_adj", "avg_log2fc")
+  specificity_df <- purrr::map2_dfr(marker_tables, method_labels, function(marker_tbl, method_label) {
+    missing_cols <- setdiff(required_cols, names(marker_tbl))
+    if (length(missing_cols) > 0) {
+      stop(
+        "Marker-gene table for method `", method_label, "` is missing required column",
+        if (length(missing_cols) > 1) "s: " else ": ",
+        paste0("`", missing_cols, "`", collapse = ", "),
+        "."
+      )
+    }
+
+    marker_tbl <- marker_tbl %>%
+      dplyr::mutate(
+        cluster = as.character(.data$cluster),
+        genesymbol = as.character(.data$genesymbol),
+        p_val_adj = suppressWarnings(as.numeric(.data$p_val_adj)),
+        avg_log2fc = suppressWarnings(as.numeric(.data$avg_log2fc)),
+        significant = !is.na(.data$p_val_adj) & .data$p_val_adj <= padj_threshold & !is.na(.data$avg_log2fc) & abs(.data$avg_log2fc) >= abs_logfc_threshold,
+        up = .data$significant & !is.na(.data$avg_log2fc) & .data$avg_log2fc > 0,
+        down = .data$significant & !is.na(.data$avg_log2fc) & .data$avg_log2fc < 0
+      ) %>%
+      dplyr::filter(!is.na(.data$cluster), nzchar(.data$cluster), !is.na(.data$genesymbol), nzchar(.data$genesymbol)) %>%
+      dplyr::distinct(.data$cluster, .data$genesymbol, .keep_all = TRUE)
+
+    clusters <- arrange_cluster_levels(marker_tbl$cluster)
+
+    gene_summary <- marker_tbl %>%
+      dplyr::group_by(.data$genesymbol) %>%
+      dplyr::summarise(
+        non_down_sig_total = sum(.data$significant & !.data$down, na.rm = TRUE),
+        non_up_sig_total = sum(.data$significant & !.data$up, na.rm = TRUE),
+        significant_total = sum(.data$significant, na.rm = TRUE),
+        .groups = "drop"
+      )
+
+    cluster_specificity <- marker_tbl %>%
+      dplyr::left_join(gene_summary, by = "genesymbol") %>%
+      dplyr::mutate(
+        candidate = dplyr::case_when(
+          specificity_mode == "up_specific" ~ .data$up,
+          specificity_mode == "down_specific" ~ .data$down,
+          specificity_mode == "exclusive_significant" ~ .data$significant
+        ),
+        specific = dplyr::case_when(
+          specificity_mode == "up_specific" ~ .data$up & .data$non_down_sig_total <= 1,
+          specificity_mode == "down_specific" ~ .data$down & .data$non_up_sig_total <= 1,
+          specificity_mode == "exclusive_significant" ~ .data$significant & .data$significant_total <= 1
+        )
+      ) %>%
+      dplyr::group_by(.data$cluster) %>%
+      dplyr::summarise(
+        n_specific = sum(.data$specific, na.rm = TRUE),
+        n_total = sum(.data$candidate, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      dplyr::mutate(
+        method = method_label,
+        specificity = dplyr::if_else(.data$n_total > 0, .data$n_specific / .data$n_total, NA_real_)
+      )
+
+    tibble::tibble(cluster = clusters) %>%
+      dplyr::left_join(cluster_specificity, by = "cluster") %>%
+      dplyr::mutate(
+        method = dplyr::coalesce(.data$method, method_label),
+        n_specific = dplyr::coalesce(.data$n_specific, 0L),
+        n_total = dplyr::coalesce(.data$n_total, 0L),
+        specificity = .data$specificity
+      ) %>%
+      dplyr::select("method", "cluster", "specificity", "n_specific", "n_total")
+  })
+
+  if (nrow(specificity_df) == 0) {
+    stop("No cluster-level marker-gene specificity values could be calculated.")
+  }
+
+  mode_label <- dplyr::case_match(
+    specificity_mode,
+    "up_specific" ~ "Upregulated in cluster; absent or significantly downregulated elsewhere",
+    "down_specific" ~ "Downregulated in cluster; absent or significantly upregulated elsewhere",
+    "exclusive_significant" ~ "Significant in cluster; not significant elsewhere"
+  )
+
+  plotted_df <- specificity_df %>%
+    dplyr::filter(!is.na(.data$specificity)) %>%
+    dplyr::mutate(
+      method = factor(.data$method, levels = method_labels)
+    )
+
+  if (nrow(plotted_df) == 0) {
+    stop("No clusters had any marker genes meeting the current specificity mode and adjusted p-value threshold.")
+  }
+
+  median_df <- plotted_df %>%
+    dplyr::group_by(.data$method) %>%
+    dplyr::summarise(
+      median_specificity = stats::median(.data$specificity, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  max_specificity <- max(c(plotted_df$specificity, median_df$median_specificity), na.rm = TRUE)
+  x_lower <- -0.02
+  x_upper <- max(0.05, max_specificity * 1.03)
+  if (max_specificity >= 0.99) {
+    x_upper <- max(x_upper, 1.02)
+  }
+
+  ggplot2::ggplot(
+    plotted_df,
+    ggplot2::aes(x = .data$specificity, y = .data$method)
+  ) +
+    ggplot2::geom_point(
+      position = ggplot2::position_jitter(width = 0, height = 0.18),
+      size = if (for_pdf) 2.4 else 2.1,
+      alpha = if (for_pdf) 0.85 else 0.78,
+      color = "dodgerblue"
+    ) +
+    ggplot2::geom_point(
+      data = median_df,
+      ggplot2::aes(x = .data$median_specificity, y = .data$method),
+      inherit.aes = FALSE,
+      shape = 3,
+      size = if (for_pdf) 4.3 else 3.8,
+      stroke = if (for_pdf) 1.05 else 0.95,
+      color = "firebrick"
+    ) +
+    ggplot2::scale_x_continuous(
+      limits = c(x_lower, x_upper),
+      breaks = pretty(c(0, x_upper), n = 5),
+      expand = c(0, 0)
+    ) +
+    ggplot2::labs(
+      x = "Cluster-specific marker-gene proportion",
+      y = NULL,
+      subtitle = paste0(
+        mode_label,
+        "\nBH adjusted p-value threshold: ",
+        format(padj_threshold, trim = TRUE),
+        "; minimum |logFC|: ",
+        format(abs_logfc_threshold, trim = TRUE)
+      )
+    ) +
+    ggplot2::theme_classic(base_size = if (for_pdf) 12 else 11) +
+    ggplot2::theme(
+      panel.grid.minor = ggplot2::element_blank(),
+      plot.subtitle = ggplot2::element_text(size = if (for_pdf) 10 else 9)
     )
 }
 
@@ -511,14 +976,76 @@ silhouette_width_biplot <- function(meta1, meta2, name1, name2, for_pdf = FALSE)
     stop("No cell barcodes were available for the selected methods.")
   }
 
+  smooth_df <- plot_df %>%
+    dplyr::filter(.data$barcode_status == "Shared barcode") %>%
+    dplyr::mutate(silhouette_delta = .data$silhouette_2 - .data$silhouette_1)
+
   status_levels <- c("Shared barcode", "Missing from one method")
   palette_values <- c(
     "Shared barcode" = "#1f78b4",
     "Missing from one method" = "grey60"
   )
 
-  point_size <- if (for_pdf) 0.9 else 0.8
-  alpha_value <- if (for_pdf) 0.22 else 0.18
+  point_size <- if (for_pdf) 0.55 else 0.45
+  alpha_value <- 0.15
+  smooth_df_value <- min(4L, max(1L, dplyr::n_distinct(smooth_df$silhouette_1) - 1L))
+  smooth_formula <- if (smooth_df_value >= 2L) {
+    stats::as.formula(paste0("y ~ splines::ns(x, df = ", smooth_df_value, ")"))
+  } else {
+    y ~ x
+  }
+  smooth_layer <- if (nrow(smooth_df) >= 2 && dplyr::n_distinct(smooth_df$silhouette_1) >= 2) {
+    ggplot2::geom_smooth(
+      data = smooth_df,
+      mapping = ggplot2::aes(x = silhouette_1, y = silhouette_2),
+      inherit.aes = FALSE,
+      method = "lm",
+      formula = smooth_formula,
+      se = FALSE,
+      color = "red",
+      linewidth = if (for_pdf) 0.8 else 0.7
+    )
+  } else {
+    NULL
+  }
+  inset_layer <- if (nrow(smooth_df) > 0) {
+    inset_histogram <- ggplot2::ggplot(smooth_df, ggplot2::aes(x = silhouette_delta)) +
+      ggplot2::geom_histogram(
+        bins = 30,
+        boundary = 0,
+        fill = "grey72",
+        color = "grey25",
+        linewidth = 0.2
+      ) +
+      ggplot2::geom_vline(xintercept = 0, color = "red", linewidth = if (for_pdf) 0.45 else 0.4) +
+      ggplot2::scale_x_continuous(breaks = c(-1, 0, 1)) +
+      ggplot2::coord_cartesian(xlim = c(-2, 2)) +
+      ggplot2::labs(
+        title = "Silhouette difference",
+        x = "Method 2 - Method 1",
+        y = "Cells"
+      ) +
+      ggplot2::theme_bw(base_size = if (for_pdf) 6.5 else 6) +
+      ggplot2::theme(
+        plot.title = ggplot2::element_text(face = "bold", size = if (for_pdf) 7.5 else 7),
+        axis.title = ggplot2::element_text(size = if (for_pdf) 6.5 else 6),
+        axis.text = ggplot2::element_text(size = if (for_pdf) 5.5 else 5),
+        panel.grid.minor = ggplot2::element_blank(),
+        panel.grid.major = ggplot2::element_line(color = "grey90", linewidth = 0.2),
+        plot.background = ggplot2::element_rect(fill = "white", color = "grey30", linewidth = 0.3),
+        plot.margin = ggplot2::margin(3, 4, 3, 4)
+      )
+
+    ggplot2::annotation_custom(
+      grob = ggplot2::ggplotGrob(inset_histogram),
+      xmin = -0.98,
+      xmax = -0.04,
+      ymin = 0.44,
+      ymax = 1.08
+    )
+  } else {
+    NULL
+  }
 
   ggplot2::ggplot(
     plot_df,
@@ -532,6 +1059,8 @@ silhouette_width_biplot <- function(meta1, meta2, name1, name2, for_pdf = FALSE)
     ggplot2::geom_hline(yintercept = -1, linetype = "dotted", color = "grey70", linewidth = 0.4) +
     ggplot2::geom_point(size = point_size, alpha = alpha_value) +
     ggplot2::geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey55", linewidth = 0.5) +
+    smooth_layer +
+    inset_layer +
     ggplot2::coord_equal(xlim = c(-1, 1), ylim = c(-1, 1), expand = TRUE) +
     ggplot2::scale_color_manual(values = palette_values, drop = FALSE, name = NULL) +
     ggplot2::labs(
