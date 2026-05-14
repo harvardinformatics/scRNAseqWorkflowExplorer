@@ -77,10 +77,6 @@ infer_bootstrap_path <- function(rds_path) {
   existing[[1]]
 }
 
-infer_marker_gene_path <- function(rds_path) {
-  paste0(stringr::str_replace(rds_path, "\\.rds$", ""), "_markergenes.csv")
-}
-
 read_seurat_meta <- function(rds_path) {
   obj <- readRDS(rds_path)
 
@@ -132,35 +128,6 @@ read_seurat_silhouette_meta <- function(rds_path) {
 read_bootstrap_tsv <- function(tsv_path) {
   readr::read_tsv(tsv_path, show_col_types = FALSE) %>%
     standardize_bootstrap_cols()
-}
-
-read_marker_gene_csv <- function(csv_path) {
-  marker_df <- readr::read_csv(csv_path, show_col_types = FALSE)
-  names(marker_df) <- names(marker_df) %>%
-    stringr::str_to_lower() %>%
-    stringr::str_replace_all("[^a-z0-9]+", "_") %>%
-    stringr::str_replace_all("_+", "_") %>%
-    stringr::str_replace_all("^_|_$", "")
-
-  required <- c("genesymbol", "cluster", "p_val_adj", "avg_log2fc")
-  missing <- setdiff(required, names(marker_df))
-
-  if (length(missing) > 0) {
-    stop(
-      "Marker-gene CSV is missing required columns after normalization: ",
-      paste(missing, collapse = ", ")
-    )
-  }
-
-  marker_df %>%
-    dplyr::transmute(
-      genesymbol = as.character(.data$genesymbol),
-      cluster = as.character(.data$cluster),
-      p_val_adj = suppressWarnings(as.numeric(.data$p_val_adj)),
-      avg_log2fc = suppressWarnings(as.numeric(.data$avg_log2fc))
-    ) %>%
-    dplyr::filter(!is.na(.data$genesymbol), nzchar(.data$genesymbol), !is.na(.data$cluster), nzchar(.data$cluster)) %>%
-    dplyr::distinct(.data$cluster, .data$genesymbol, .data$p_val_adj, .data$avg_log2fc)
 }
 
 find_seurat_object_paths <- function(data_dir = "data") {
@@ -695,110 +662,6 @@ ui <- fluidPage(
       )
     ),
     tabPanel(
-      "Marker gene cluster similarity heatmap",
-      sidebarLayout(
-        sidebarPanel(
-          width = 4,
-          helpText("Select two methods and plot cluster-level Jaccard similarity between their marker-gene sets, allowing for filtering of genes based upon their Benjamini-Hochberg adjusted p-values."),
-          selectInput("marker_jaccard_method1", "Method 1", choices = NULL),
-          selectInput("marker_jaccard_method2", "Method 2", choices = NULL),
-          numericInput(
-            "marker_jaccard_threshold",
-            "Minimum Jaccard similarity threshold",
-            value = 0.2,
-            min = 0,
-            max = 1,
-            step = 0.01
-          ),
-          numericInput(
-            "marker_jaccard_padj_threshold",
-            "Benjamini-Hochberg adjusted p-value threshold",
-            value = 0.05,
-            min = 0,
-            max = 1,
-            step = 0.001
-          ),
-          actionButton("refresh_marker_jaccard", "Refresh method list"),
-          downloadButton("download_marker_jaccard_pdf", "Download hi-res PDF")
-        ),
-        mainPanel(
-          width = 8,
-          uiOutput("marker_jaccard_error"),
-          plotOutput("marker_jaccard_heatmap", height = "620px"),
-          verbatimTextOutput("marker_jaccard_status")
-        )
-      )
-    ),
-    tabPanel(
-      "Marker gene specificity",
-      sidebarLayout(
-        sidebarPanel(
-          width = 4,
-          helpText("Across all selected methods, plot the within-cluster proportion of marker genes that are specific to that cluster under the chosen specificity rule."),
-          selectInput(
-            "marker_specificity_mode",
-            "Specificity calculation",
-            choices = c(
-              "Upregulated in cluster; not significant or significantly downregulated elsewhere" = "up_specific",
-              "Downregulated in cluster; not significant or significantly upregulated elsewhere" = "down_specific",
-              "Significantly up or downregulated in cluster; not significant elsewhere" = "exclusive_significant"
-            ),
-            selected = "up_specific"
-          ),
-          numericInput(
-            "marker_specificity_padj_threshold",
-            "Benjamini-Hochberg adjusted p-value threshold",
-            value = 0.05,
-            min = 0,
-            max = 1,
-            step = 0.001
-          ),
-          numericInput(
-            "marker_specificity_abs_logfc_threshold",
-            "Minimum absolute log-fold change",
-            value = 0,
-            min = 0,
-            step = 0.1
-          ),
-          actionButton("refresh_marker_specificity", "Refresh method list"),
-          downloadButton("download_marker_specificity_pdf", "Download hi-res PDF")
-        ),
-        mainPanel(
-          width = 8,
-          uiOutput("marker_specificity_error"),
-          plotOutput("marker_specificity_plot", height = "620px"),
-          verbatimTextOutput("marker_specificity_status")
-        )
-      )
-    ),
-    tabPanel(
-      "Cluster barcode vs marker gene similarity",
-      sidebarLayout(
-        sidebarPanel(
-          width = 4,
-          helpText("Select two methods and compare cluster barcode-sharing Jaccard similarities to marker-gene-sharing Jaccard similarities on matched cluster pairs."),
-          selectInput("cluster_vs_marker_method1", "Method 1", choices = c("Choose a method" = "")),
-          selectInput("cluster_vs_marker_method2", "Method 2", choices = c("Choose a method" = "")),
-          numericInput(
-            "cluster_vs_marker_padj_threshold",
-            "Benjamini-Hochberg adjusted p-value threshold",
-            value = 0.05,
-            min = 0,
-            max = 1,
-            step = 0.001
-          ),
-          actionButton("refresh_cluster_vs_marker", "Refresh method list"),
-          downloadButton("download_cluster_vs_marker_pdf", "Download hi-res PDF")
-        ),
-        mainPanel(
-          width = 8,
-          uiOutput("cluster_vs_marker_error"),
-          uiOutput("cluster_vs_marker_plot_ui"),
-          verbatimTextOutput("cluster_vs_marker_status")
-        )
-      )
-    ),
-    tabPanel(
       "Silhouette width biplot",
       sidebarLayout(
         sidebarPanel(
@@ -953,16 +816,6 @@ server <- function(input, output, session) {
     normalize_min_size_input(input$upset_min_size, default = 1L)
   })
 
-  marker_specificity_abs_logfc_value <- reactive({
-    value <- input$marker_specificity_abs_logfc_threshold
-
-    if (is.null(value) || length(value) != 1 || is.na(value) || !is.finite(value) || value < 0) {
-      return(0)
-    }
-
-    as.numeric(value)
-  })
-
   silhouette_stability_metrics <- reactive({
     defaults <- c(
       x = "median_silhouette",
@@ -1033,20 +886,6 @@ server <- function(input, output, session) {
         selected_jaccard_method2 <- pairs$rds[[which(pairs$rds != selected_jaccard_method1)[1]]]
       }
 
-      current_marker_jaccard_method1 <- isolate(input$marker_jaccard_method1)
-      current_marker_jaccard_method2 <- isolate(input$marker_jaccard_method2)
-      selected_marker_jaccard_method1 <- if (!is.null(current_marker_jaccard_method1) && current_marker_jaccard_method1 %in% pairs$rds) current_marker_jaccard_method1 else ""
-      selected_marker_jaccard_method2 <- if (!is.null(current_marker_jaccard_method2) && current_marker_jaccard_method2 %in% pairs$rds) current_marker_jaccard_method2 else ""
-
-      current_cluster_vs_marker_method1 <- isolate(input$cluster_vs_marker_method1)
-      current_cluster_vs_marker_method2 <- isolate(input$cluster_vs_marker_method2)
-      selected_cluster_vs_marker_method1 <- if (!is.null(current_cluster_vs_marker_method1) && current_cluster_vs_marker_method1 %in% pairs$rds) current_cluster_vs_marker_method1 else pairs$rds[[1]]
-      fallback_cluster_vs_marker_method2 <- if (nrow(pairs) >= 2) pairs$rds[[2]] else ""
-      selected_cluster_vs_marker_method2 <- if (!is.null(current_cluster_vs_marker_method2) && current_cluster_vs_marker_method2 %in% pairs$rds) current_cluster_vs_marker_method2 else fallback_cluster_vs_marker_method2
-      if (identical(selected_cluster_vs_marker_method1, selected_cluster_vs_marker_method2) && nrow(pairs) >= 2) {
-        selected_cluster_vs_marker_method2 <- pairs$rds[[which(pairs$rds != selected_cluster_vs_marker_method1)[1]]]
-      }
-
       current_silhouette_biplot_method1 <- isolate(input$silhouette_biplot_method1)
       current_silhouette_biplot_method2 <- isolate(input$silhouette_biplot_method2)
       selected_silhouette_biplot_method1 <- if (!is.null(current_silhouette_biplot_method1) && current_silhouette_biplot_method1 %in% pairs$rds) current_silhouette_biplot_method1 else ""
@@ -1056,10 +895,6 @@ server <- function(input, output, session) {
       updateSelectInput(session, "method2", choices = choice_map_with_blank, selected = selected_method2)
       updateSelectInput(session, "jaccard_method1", choices = choice_map, selected = selected_jaccard_method1)
       updateSelectInput(session, "jaccard_method2", choices = choice_map, selected = selected_jaccard_method2)
-      updateSelectInput(session, "marker_jaccard_method1", choices = choice_map_with_blank, selected = selected_marker_jaccard_method1)
-      updateSelectInput(session, "marker_jaccard_method2", choices = choice_map_with_blank, selected = selected_marker_jaccard_method2)
-      updateSelectInput(session, "cluster_vs_marker_method1", choices = choice_map_with_blank, selected = selected_cluster_vs_marker_method1)
-      updateSelectInput(session, "cluster_vs_marker_method2", choices = choice_map_with_blank, selected = selected_cluster_vs_marker_method2)
       updateSelectInput(session, "silhouette_biplot_method1", choices = choice_map_with_blank, selected = selected_silhouette_biplot_method1)
       updateSelectInput(session, "silhouette_biplot_method2", choices = choice_map_with_blank, selected = selected_silhouette_biplot_method2)
     } else {
@@ -1067,10 +902,6 @@ server <- function(input, output, session) {
       updateSelectInput(session, "method2", choices = c("Choose a method" = ""), selected = "")
       updateSelectInput(session, "jaccard_method1", choices = c())
       updateSelectInput(session, "jaccard_method2", choices = c())
-      updateSelectInput(session, "marker_jaccard_method1", choices = c("Choose a method" = ""), selected = "")
-      updateSelectInput(session, "marker_jaccard_method2", choices = c("Choose a method" = ""), selected = "")
-      updateSelectInput(session, "cluster_vs_marker_method1", choices = c("Choose a method" = ""), selected = "")
-      updateSelectInput(session, "cluster_vs_marker_method2", choices = c("Choose a method" = ""), selected = "")
       updateSelectInput(session, "silhouette_biplot_method1", choices = c())
       updateSelectInput(session, "silhouette_biplot_method2", choices = c())
     }
@@ -1111,9 +942,6 @@ server <- function(input, output, session) {
 
   observeEvent(input$refresh, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_jaccard, refresh_choices(), ignoreInit = TRUE)
-  observeEvent(input$refresh_marker_jaccard, refresh_choices(), ignoreInit = TRUE)
-  observeEvent(input$refresh_marker_specificity, refresh_choices(), ignoreInit = TRUE)
-  observeEvent(input$refresh_cluster_vs_marker, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_silhouette_biplot, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_silhouette_stability, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_silhouette_tree, refresh_choices(), ignoreInit = TRUE)
@@ -1278,88 +1106,6 @@ server <- function(input, output, session) {
     )
   })
 
-  loaded_marker_jaccard_data <- reactive({
-    req(input$marker_jaccard_method1, input$marker_jaccard_method2)
-
-    validate(
-      need(input$marker_jaccard_method1 != input$marker_jaccard_method2, "Pick two different methods."),
-      need(file.exists(input$marker_jaccard_method1), "Method 1 file does not exist."),
-      need(file.exists(input$marker_jaccard_method2), "Method 2 file does not exist.")
-    )
-
-    marker1 <- infer_marker_gene_path(input$marker_jaccard_method1)
-    marker2 <- infer_marker_gene_path(input$marker_jaccard_method2)
-
-    validate(
-      need(file.exists(marker1), paste("Missing marker-gene CSV for method 1:", basename(marker1))),
-      need(file.exists(marker2), paste("Missing marker-gene CSV for method 2:", basename(marker2)))
-    )
-
-    list(
-      markers1 = read_marker_gene_csv(marker1),
-      markers2 = read_marker_gene_csv(marker2)
-    )
-  })
-
-  loaded_cluster_vs_marker_data <- reactive({
-    method1 <- input$cluster_vs_marker_method1
-    method2 <- input$cluster_vs_marker_method2
-    if (is.null(method1)) method1 <- ""
-    if (is.null(method2)) method2 <- ""
-
-    validate(
-      need(nzchar(method1) && nzchar(method2), "Pick two methods."),
-      need(method1 != method2, "Pick two different methods."),
-      need(file.exists(method1), "Method 1 file does not exist."),
-      need(file.exists(method2), "Method 2 file does not exist.")
-    )
-
-    marker1 <- infer_marker_gene_path(method1)
-    marker2 <- infer_marker_gene_path(method2)
-
-    validate(
-      need(file.exists(marker1), paste("Missing marker-gene CSV for method 1:", basename(marker1))),
-      need(file.exists(marker2), paste("Missing marker-gene CSV for method 2:", basename(marker2)))
-    )
-
-    list(
-      meta1 = read_seurat_cluster_meta(method1),
-      meta2 = read_seurat_cluster_meta(method2),
-      markers1 = read_marker_gene_csv(marker1),
-      markers2 = read_marker_gene_csv(marker2)
-    )
-  })
-
-  all_marker_gene_method_data <- reactive({
-    rds_paths <- seurat_object_paths()
-    label_map <- method_labels()
-
-    validate(
-      need(length(rds_paths) > 0, "No Seurat .rds files found in ./data.")
-    )
-
-    marker_paths <- purrr::map_chr(rds_paths, infer_marker_gene_path)
-    missing_marker_paths <- marker_paths[!file.exists(marker_paths)]
-
-    validate(
-      need(
-        length(missing_marker_paths) == 0,
-        paste0(
-          "Missing marker-gene CSV file(s): ",
-          paste(basename(missing_marker_paths), collapse = ", ")
-        )
-      )
-    )
-
-    purrr::map2(rds_paths, marker_paths, function(rds_path, marker_path) {
-      list(
-        rds = rds_path,
-        label = resolve_method_label(label_map, rds_path),
-        markers = read_marker_gene_csv(marker_path)
-      )
-    })
-  })
-
   loaded_silhouette_biplot_data <- reactive({
     req(input$silhouette_biplot_method1, input$silhouette_biplot_method2)
 
@@ -1440,10 +1186,6 @@ server <- function(input, output, session) {
       updateSelectInput(session, "method2", choices = c("Choose a method" = ""), selected = "")
       updateSelectInput(session, "jaccard_method1", choices = c())
       updateSelectInput(session, "jaccard_method2", choices = c())
-      updateSelectInput(session, "marker_jaccard_method1", choices = c("Choose a method" = ""), selected = "")
-      updateSelectInput(session, "marker_jaccard_method2", choices = c("Choose a method" = ""), selected = "")
-      updateSelectInput(session, "cluster_vs_marker_method1", choices = c("Choose a method" = ""), selected = "")
-      updateSelectInput(session, "cluster_vs_marker_method2", choices = c("Choose a method" = ""), selected = "")
       updateSelectInput(session, "silhouette_biplot_method1", choices = c("Choose a method" = ""), selected = "")
       updateSelectInput(session, "silhouette_biplot_method2", choices = c("Choose a method" = ""), selected = "")
       return()
@@ -1457,26 +1199,10 @@ server <- function(input, output, session) {
       )
     )
 
-    selected_cluster_vs_marker_method1 <- isolate(input$cluster_vs_marker_method1)
-    selected_cluster_vs_marker_method2 <- isolate(input$cluster_vs_marker_method2)
-    if (is.null(selected_cluster_vs_marker_method1) || !(selected_cluster_vs_marker_method1 %in% pairs$rds)) {
-      selected_cluster_vs_marker_method1 <- pairs$rds[[1]]
-    }
-    if (is.null(selected_cluster_vs_marker_method2) || !(selected_cluster_vs_marker_method2 %in% pairs$rds)) {
-      selected_cluster_vs_marker_method2 <- if (nrow(pairs) >= 2) pairs$rds[[2]] else ""
-    }
-    if (identical(selected_cluster_vs_marker_method1, selected_cluster_vs_marker_method2) && nrow(pairs) >= 2) {
-      selected_cluster_vs_marker_method2 <- pairs$rds[[which(pairs$rds != selected_cluster_vs_marker_method1)[1]]]
-    }
-
     updateSelectInput(session, "method1", choices = c("Choose a method" = "", choice_map), selected = isolate(input$method1))
     updateSelectInput(session, "method2", choices = c("Choose a method" = "", choice_map), selected = isolate(input$method2))
     updateSelectInput(session, "jaccard_method1", choices = choice_map, selected = isolate(input$jaccard_method1))
     updateSelectInput(session, "jaccard_method2", choices = choice_map, selected = isolate(input$jaccard_method2))
-    updateSelectInput(session, "marker_jaccard_method1", choices = c("Choose a method" = "", choice_map), selected = isolate(input$marker_jaccard_method1))
-    updateSelectInput(session, "marker_jaccard_method2", choices = c("Choose a method" = "", choice_map), selected = isolate(input$marker_jaccard_method2))
-    updateSelectInput(session, "cluster_vs_marker_method1", choices = c("Choose a method" = "", choice_map), selected = selected_cluster_vs_marker_method1)
-    updateSelectInput(session, "cluster_vs_marker_method2", choices = c("Choose a method" = "", choice_map), selected = selected_cluster_vs_marker_method2)
     updateSelectInput(session, "silhouette_biplot_method1", choices = c("Choose a method" = "", choice_map), selected = isolate(input$silhouette_biplot_method1))
     updateSelectInput(session, "silhouette_biplot_method2", choices = c("Choose a method" = "", choice_map), selected = isolate(input$silhouette_biplot_method2))
   })
@@ -1648,69 +1374,6 @@ server <- function(input, output, session) {
     })$error
   })
 
-  marker_jaccard_error_message <- reactive({
-    if (workflows_confirmed() || !identical(input$analysis_tabs, "Marker gene cluster similarity heatmap")) {
-      return(NULL)
-    }
-
-    capture_condition_message({
-      dat <- loaded_marker_jaccard_data()
-      label_map <- method_labels()
-      label1 <- resolve_method_label(label_map, input$marker_jaccard_method1)
-      label2 <- resolve_method_label(label_map, input$marker_jaccard_method2)
-
-      marker_gene_jaccard_heatmap_plot(
-        markers1 = dat$markers1,
-        markers2 = dat$markers2,
-        name1 = label1,
-        name2 = label2,
-        threshold = input$marker_jaccard_threshold,
-        padj_threshold = input$marker_jaccard_padj_threshold
-      )
-    })$error
-  })
-
-  marker_specificity_error_message <- reactive({
-    if (workflows_confirmed() || !identical(input$analysis_tabs, "Marker gene specificity")) {
-      return(NULL)
-    }
-
-    capture_condition_message({
-      methods <- all_marker_gene_method_data()
-
-      marker_gene_specificity_plot(
-        marker_tables = purrr::map(methods, "markers"),
-        method_labels = purrr::map_chr(methods, "label"),
-        specificity_mode = input$marker_specificity_mode,
-        padj_threshold = input$marker_specificity_padj_threshold,
-        abs_logfc_threshold = marker_specificity_abs_logfc_value()
-      )
-    })$error
-  })
-
-  cluster_vs_marker_error_message <- reactive({
-    if (workflows_confirmed() || !identical(input$analysis_tabs, "Cluster barcode vs marker gene similarity")) {
-      return(NULL)
-    }
-
-    capture_condition_message({
-      dat <- loaded_cluster_vs_marker_data()
-      label_map <- method_labels()
-      label1 <- resolve_method_label(label_map, input$cluster_vs_marker_method1)
-      label2 <- resolve_method_label(label_map, input$cluster_vs_marker_method2)
-
-      cluster_vs_marker_jaccard_plot(
-        meta1 = dat$meta1,
-        meta2 = dat$meta2,
-        markers1 = dat$markers1,
-        markers2 = dat$markers2,
-        name1 = label1,
-        name2 = label2,
-        padj_threshold = input$cluster_vs_marker_padj_threshold
-      )
-    })$error
-  })
-
   silhouette_biplot_error_message <- reactive({
     if (workflows_confirmed() || !identical(input$analysis_tabs, "Silhouette width biplot")) {
       return(NULL)
@@ -1795,22 +1458,6 @@ server <- function(input, output, session) {
 
   output$jaccard_error <- renderUI({
     render_tab_error_box(jaccard_error_message())
-  })
-
-  output$marker_jaccard_error <- renderUI({
-    render_tab_error_box(marker_jaccard_error_message())
-  })
-
-  output$marker_specificity_error <- renderUI({
-    render_tab_error_box(marker_specificity_error_message())
-  })
-
-  output$cluster_vs_marker_error <- renderUI({
-    render_tab_error_box(cluster_vs_marker_error_message())
-  })
-
-  output$cluster_vs_marker_plot_ui <- renderUI({
-    plotOutput("cluster_vs_marker_plot", height = "620px")
   })
 
   output$silhouette_biplot_error <- renderUI({
@@ -1927,54 +1574,6 @@ server <- function(input, output, session) {
     )
   }, res = 110)
 
-  output$marker_jaccard_heatmap <- renderPlot({
-    req(is.null(marker_jaccard_error_message()))
-    dat <- loaded_marker_jaccard_data()
-    label_map <- method_labels()
-    label1 <- resolve_method_label(label_map, input$marker_jaccard_method1)
-    label2 <- resolve_method_label(label_map, input$marker_jaccard_method2)
-
-    marker_gene_jaccard_heatmap_plot(
-      markers1 = dat$markers1,
-      markers2 = dat$markers2,
-      name1 = label1,
-      name2 = label2,
-      threshold = input$marker_jaccard_threshold,
-      padj_threshold = input$marker_jaccard_padj_threshold
-    )
-  }, res = 110)
-
-  output$marker_specificity_plot <- renderPlot({
-    req(is.null(marker_specificity_error_message()))
-    methods <- all_marker_gene_method_data()
-
-    marker_gene_specificity_plot(
-      marker_tables = purrr::map(methods, "markers"),
-      method_labels = purrr::map_chr(methods, "label"),
-      specificity_mode = input$marker_specificity_mode,
-      padj_threshold = input$marker_specificity_padj_threshold,
-      abs_logfc_threshold = marker_specificity_abs_logfc_value()
-    )
-  }, res = 110)
-
-  output$cluster_vs_marker_plot <- renderPlot({
-    req(is.null(cluster_vs_marker_error_message()))
-    dat <- loaded_cluster_vs_marker_data()
-    label_map <- method_labels()
-    label1 <- resolve_method_label(label_map, input$cluster_vs_marker_method1)
-    label2 <- resolve_method_label(label_map, input$cluster_vs_marker_method2)
-
-    cluster_vs_marker_jaccard_plot(
-      meta1 = dat$meta1,
-      meta2 = dat$meta2,
-      markers1 = dat$markers1,
-      markers2 = dat$markers2,
-      name1 = label1,
-      name2 = label2,
-      padj_threshold = input$cluster_vs_marker_padj_threshold
-    )
-  }, res = 110)
-
   output$silhouette_biplot_plot <- renderPlot({
     req(is.null(silhouette_biplot_error_message()))
     dat <- loaded_silhouette_biplot_data()
@@ -2046,86 +1645,6 @@ server <- function(input, output, session) {
         name1 = label1,
         name2 = label2,
         threshold = input$jaccard_threshold,
-        for_pdf = TRUE
-      ))
-    }
-  )
-
-  output$download_marker_jaccard_pdf <- downloadHandler(
-    filename = function() {
-      label_map <- method_labels()
-      paste0(
-        "marker-gene-cluster-similarity-heatmap-",
-        resolve_method_label(label_map, input$marker_jaccard_method1),
-        "-vs-",
-        resolve_method_label(label_map, input$marker_jaccard_method2),
-        ".pdf"
-      )
-    },
-    content = function(file) {
-      dat <- loaded_marker_jaccard_data()
-      label_map <- method_labels()
-      label1 <- resolve_method_label(label_map, input$marker_jaccard_method1)
-      label2 <- resolve_method_label(label_map, input$marker_jaccard_method2)
-
-      pdf_width <- 6.3
-      pdf_height <- 6.3
-
-      grDevices::pdf(file, width = pdf_width, height = pdf_height, onefile = TRUE)
-      on.exit(grDevices::dev.off(), add = TRUE)
-      print(marker_gene_jaccard_heatmap_plot(
-        markers1 = dat$markers1,
-        markers2 = dat$markers2,
-        name1 = label1,
-        name2 = label2,
-        threshold = input$marker_jaccard_threshold,
-        padj_threshold = input$marker_jaccard_padj_threshold,
-        for_pdf = TRUE
-      ))
-    }
-  )
-
-  output$download_marker_specificity_pdf <- downloadHandler(
-    filename = function() {
-      paste0("marker-gene-specificity-", format(Sys.Date(), "%Y%m%d"), ".pdf")
-    },
-    content = function(file) {
-      methods <- all_marker_gene_method_data()
-
-      grDevices::pdf(file, width = 9.5, height = 6.5, onefile = TRUE)
-      on.exit(grDevices::dev.off(), add = TRUE)
-      print(marker_gene_specificity_plot(
-        marker_tables = purrr::map(methods, "markers"),
-        method_labels = purrr::map_chr(methods, "label"),
-        specificity_mode = input$marker_specificity_mode,
-        padj_threshold = input$marker_specificity_padj_threshold,
-        abs_logfc_threshold = marker_specificity_abs_logfc_value(),
-        for_pdf = TRUE
-      ))
-    }
-  )
-
-  output$download_cluster_vs_marker_pdf <- downloadHandler(
-    filename = function() {
-      paste0("cluster-barcode-vs-marker-similarity-", format(Sys.Date(), "%Y%m%d"), ".pdf")
-    },
-    content = function(file) {
-      dat <- loaded_cluster_vs_marker_data()
-      label_map <- method_labels()
-      label1 <- resolve_method_label(label_map, input$cluster_vs_marker_method1)
-      label2 <- resolve_method_label(label_map, input$cluster_vs_marker_method2)
-
-      grDevices::pdf(file, width = 10, height = 7.5, onefile = TRUE)
-      on.exit(grDevices::dev.off(), add = TRUE)
-
-      print(cluster_vs_marker_jaccard_plot(
-        meta1 = dat$meta1,
-        meta2 = dat$meta2,
-        markers1 = dat$markers1,
-        markers2 = dat$markers2,
-        name1 = label1,
-        name2 = label2,
-        padj_threshold = input$cluster_vs_marker_padj_threshold,
         for_pdf = TRUE
       ))
     }
@@ -2466,99 +1985,6 @@ server <- function(input, output, session) {
       ". Heatmap cells at or above ",
       format(input$jaccard_threshold, trim = TRUE),
       " are annotated."
-    )
-  })
-
-  output$marker_jaccard_status <- renderText({
-    if (!workflows_confirmed() && !is.null(marker_jaccard_error_message())) {
-      return(paste0("Full error message:\n", marker_jaccard_error_message()))
-    }
-
-    dat <- loaded_marker_jaccard_data()
-    label_map <- method_labels()
-    label1 <- resolve_method_label(label_map, input$marker_jaccard_method1)
-    label2 <- resolve_method_label(label_map, input$marker_jaccard_method2)
-    cluster_count1 <- dplyr::n_distinct(dat$markers1$cluster)
-    cluster_count2 <- dplyr::n_distinct(dat$markers2$cluster)
-
-    paste0(
-      "Comparing marker-gene cluster similarity for ",
-      label1,
-      " vs ",
-      label2,
-      ". Cluster counts: ",
-      cluster_count1,
-      " / ",
-      cluster_count2,
-      ". Shared genes are only counted in the intersection when they are regulated in the same direction in both methods",
-      ". Genes with Benjamini-Hochberg adjusted p-value above ",
-      format(input$marker_jaccard_padj_threshold, trim = TRUE),
-      " are excluded. Heatmap cells at or above ",
-      format(input$marker_jaccard_threshold, trim = TRUE),
-      " are annotated with *."
-    )
-  })
-
-  output$marker_specificity_status <- renderText({
-    if (!workflows_confirmed() && !is.null(marker_specificity_error_message())) {
-      return(paste0("Full error message:\n", marker_specificity_error_message()))
-    }
-
-    methods <- all_marker_gene_method_data()
-    cluster_total <- methods %>%
-      purrr::map("markers") %>%
-      purrr::map_int(~ dplyr::n_distinct(.x$cluster)) %>%
-      sum()
-
-    mode_label <- dplyr::case_match(
-      input$marker_specificity_mode,
-      "up_specific" ~ "upregulated in cluster, absent or significantly downregulated elsewhere",
-      "down_specific" ~ "downregulated in cluster, absent or significantly upregulated elsewhere",
-      "exclusive_significant" ~ "significant in cluster, not significant elsewhere"
-    )
-
-    paste0(
-      "Loaded ",
-      length(methods),
-      " methods spanning ",
-      cluster_total,
-      " clusters. Specificity mode: ",
-      mode_label,
-      ". Benjamini-Hochberg adjusted p-value threshold: ",
-      format(input$marker_specificity_padj_threshold, trim = TRUE),
-      ". Minimum absolute log-fold change: ",
-      format(marker_specificity_abs_logfc_value(), trim = TRUE),
-      "."
-    )
-  })
-
-  output$cluster_vs_marker_status <- renderText({
-    if (!workflows_confirmed() && !is.null(cluster_vs_marker_error_message())) {
-      return(paste0("Full error message:\n", cluster_vs_marker_error_message()))
-    }
-
-    dat <- loaded_cluster_vs_marker_data()
-    label_map <- method_labels()
-    label1 <- resolve_method_label(label_map, input$cluster_vs_marker_method1)
-    label2 <- resolve_method_label(label_map, input$cluster_vs_marker_method2)
-    point_total <- nrow(calculate_cluster_vs_marker_jaccard_df(
-      meta1 = dat$meta1,
-      meta2 = dat$meta2,
-      markers1 = dat$markers1,
-      markers2 = dat$markers2,
-      padj_threshold = input$cluster_vs_marker_padj_threshold
-    ))
-
-    paste0(
-      "Comparing ",
-      label1,
-      " vs ",
-      label2,
-      ". The plot includes ",
-      point_total,
-      " matched cluster-pair similarity points. Benjamini-Hochberg adjusted p-value threshold: ",
-      format(input$cluster_vs_marker_padj_threshold, trim = TRUE),
-      "."
     )
   })
 

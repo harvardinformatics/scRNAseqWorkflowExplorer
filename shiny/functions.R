@@ -976,14 +976,76 @@ silhouette_width_biplot <- function(meta1, meta2, name1, name2, for_pdf = FALSE)
     stop("No cell barcodes were available for the selected methods.")
   }
 
+  smooth_df <- plot_df %>%
+    dplyr::filter(.data$barcode_status == "Shared barcode") %>%
+    dplyr::mutate(silhouette_delta = .data$silhouette_2 - .data$silhouette_1)
+
   status_levels <- c("Shared barcode", "Missing from one method")
   palette_values <- c(
     "Shared barcode" = "#1f78b4",
     "Missing from one method" = "grey60"
   )
 
-  point_size <- if (for_pdf) 0.9 else 0.8
-  alpha_value <- if (for_pdf) 0.22 else 0.18
+  point_size <- if (for_pdf) 0.55 else 0.45
+  alpha_value <- 0.15
+  smooth_df_value <- min(4L, max(1L, dplyr::n_distinct(smooth_df$silhouette_1) - 1L))
+  smooth_formula <- if (smooth_df_value >= 2L) {
+    stats::as.formula(paste0("y ~ splines::ns(x, df = ", smooth_df_value, ")"))
+  } else {
+    y ~ x
+  }
+  smooth_layer <- if (nrow(smooth_df) >= 2 && dplyr::n_distinct(smooth_df$silhouette_1) >= 2) {
+    ggplot2::geom_smooth(
+      data = smooth_df,
+      mapping = ggplot2::aes(x = silhouette_1, y = silhouette_2),
+      inherit.aes = FALSE,
+      method = "lm",
+      formula = smooth_formula,
+      se = FALSE,
+      color = "red",
+      linewidth = if (for_pdf) 0.8 else 0.7
+    )
+  } else {
+    NULL
+  }
+  inset_layer <- if (nrow(smooth_df) > 0) {
+    inset_histogram <- ggplot2::ggplot(smooth_df, ggplot2::aes(x = silhouette_delta)) +
+      ggplot2::geom_histogram(
+        bins = 30,
+        boundary = 0,
+        fill = "grey72",
+        color = "grey25",
+        linewidth = 0.2
+      ) +
+      ggplot2::geom_vline(xintercept = 0, color = "red", linewidth = if (for_pdf) 0.45 else 0.4) +
+      ggplot2::scale_x_continuous(breaks = c(-1, 0, 1)) +
+      ggplot2::coord_cartesian(xlim = c(-2, 2)) +
+      ggplot2::labs(
+        title = "Silhouette difference",
+        x = "Method 2 - Method 1",
+        y = "Cells"
+      ) +
+      ggplot2::theme_bw(base_size = if (for_pdf) 6.5 else 6) +
+      ggplot2::theme(
+        plot.title = ggplot2::element_text(face = "bold", size = if (for_pdf) 7.5 else 7),
+        axis.title = ggplot2::element_text(size = if (for_pdf) 6.5 else 6),
+        axis.text = ggplot2::element_text(size = if (for_pdf) 5.5 else 5),
+        panel.grid.minor = ggplot2::element_blank(),
+        panel.grid.major = ggplot2::element_line(color = "grey90", linewidth = 0.2),
+        plot.background = ggplot2::element_rect(fill = "white", color = "grey30", linewidth = 0.3),
+        plot.margin = ggplot2::margin(3, 4, 3, 4)
+      )
+
+    ggplot2::annotation_custom(
+      grob = ggplot2::ggplotGrob(inset_histogram),
+      xmin = -0.98,
+      xmax = -0.04,
+      ymin = 0.44,
+      ymax = 1.08
+    )
+  } else {
+    NULL
+  }
 
   ggplot2::ggplot(
     plot_df,
@@ -997,6 +1059,8 @@ silhouette_width_biplot <- function(meta1, meta2, name1, name2, for_pdf = FALSE)
     ggplot2::geom_hline(yintercept = -1, linetype = "dotted", color = "grey70", linewidth = 0.4) +
     ggplot2::geom_point(size = point_size, alpha = alpha_value) +
     ggplot2::geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey55", linewidth = 0.5) +
+    smooth_layer +
+    inset_layer +
     ggplot2::coord_equal(xlim = c(-1, 1), ylim = c(-1, 1), expand = TRUE) +
     ggplot2::scale_color_manual(values = palette_values, drop = FALSE, name = NULL) +
     ggplot2::labs(
