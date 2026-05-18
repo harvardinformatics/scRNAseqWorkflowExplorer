@@ -108,21 +108,29 @@ read_seurat_cluster_meta <- function(rds_path) {
   meta
 }
 
-read_seurat_silhouette_meta <- function(rds_path) {
+read_seurat_metric_meta <- function(rds_path, metric_col) {
   obj <- readRDS(rds_path)
 
   if (!inherits(obj, "Seurat")) {
     stop("RDS is not a Seurat object: ", basename(rds_path))
   }
 
-  if (!("silhouette_width" %in% colnames(obj@meta.data))) {
-    stop("Missing `silhouette_width` in Seurat metadata: ", basename(rds_path))
+  if (!(metric_col %in% colnames(obj@meta.data))) {
+    stop("Missing `", metric_col, "` in Seurat metadata: ", basename(rds_path))
   }
 
-  meta <- obj@meta.data[, "silhouette_width", drop = FALSE]
+  meta <- obj@meta.data[, metric_col, drop = FALSE]
   rownames(meta) <- rownames(obj@meta.data)
   rm(obj)
   meta
+}
+
+read_seurat_silhouette_meta <- function(rds_path) {
+  read_seurat_metric_meta(rds_path, "silhouette_width")
+}
+
+read_seurat_neighborhood_purity_meta <- function(rds_path) {
+  read_seurat_metric_meta(rds_path, "neighborhood_purity")
 }
 
 read_bootstrap_tsv <- function(tsv_path) {
@@ -666,7 +674,7 @@ ui <- fluidPage(
       sidebarLayout(
         sidebarPanel(
           width = 4,
-          helpText("Pick two methods and compare cell-level silhouette widths. If a barcode is absent from one method, its silhouette width is set to -1 for that axis."),
+          helpText("Pick two methods and compare cell-level silhouette widths for barcodes shared by both methods."),
           selectInput("silhouette_biplot_method1", "Method 1", choices = NULL),
           selectInput("silhouette_biplot_method2", "Method 2", choices = NULL),
           actionButton("refresh_silhouette_biplot", "Refresh method list"),
@@ -681,16 +689,36 @@ ui <- fluidPage(
       )
     ),
     tabPanel(
-      "Cluster stability, silhouette width, and size",
+      "Neighborhood purity biplot",
       sidebarLayout(
         sidebarPanel(
           width = 4,
-          helpText("For all selected methods, plot per cluster median Jaccard stability, cluster size, and silhouette width."),
+          helpText("Pick two methods and compare cell-level neighborhood purity for barcodes shared by both methods."),
+          selectInput("neighborhood_purity_biplot_method1", "Method 1", choices = NULL),
+          selectInput("neighborhood_purity_biplot_method2", "Method 2", choices = NULL),
+          actionButton("refresh_neighborhood_purity_biplot", "Refresh method list"),
+          downloadButton("download_neighborhood_purity_biplot_pdf", "Download hi-res PDF")
+        ),
+        mainPanel(
+          width = 8,
+          uiOutput("neighborhood_purity_biplot_error"),
+          plotOutput("neighborhood_purity_biplot_plot", height = "620px"),
+          verbatimTextOutput("neighborhood_purity_biplot_status")
+        )
+      )
+    ),
+    tabPanel(
+      "Multi-method cluster stats",
+      sidebarLayout(
+        sidebarPanel(
+          width = 4,
+          helpText("For all selected methods, plot per-cluster statistics including median Jaccard stability, cluster size, median silhouette width, and median neighborhood purity. The color ramp spans the observed range of the selected color metric, with white at the midpoint between the minimum and maximum plotted values."),
           selectInput(
             "silhouette_stability_x",
             "X-axis",
             choices = c(
               "Median silhouette width" = "median_silhouette",
+              "Median neighborhood purity" = "median_neighborhood_purity",
               "Cluster stability" = "median_max_jaccard",
               "Cluster size" = "cluster_size"
             ),
@@ -702,6 +730,7 @@ ui <- fluidPage(
             choices = c(
               "Cluster stability" = "median_max_jaccard",
               "Median silhouette width" = "median_silhouette",
+              "Median neighborhood purity" = "median_neighborhood_purity",
               "Cluster size" = "cluster_size"
             ),
             selected = "median_max_jaccard"
@@ -712,6 +741,7 @@ ui <- fluidPage(
             choices = c(
               "Cluster size" = "cluster_size",
               "Median silhouette width" = "median_silhouette",
+              "Median neighborhood purity" = "median_neighborhood_purity",
               "Cluster stability" = "median_max_jaccard"
             ),
             selected = "cluster_size"
@@ -724,6 +754,32 @@ ui <- fluidPage(
           uiOutput("silhouette_stability_error"),
           uiOutput("silhouette_stability_plot_ui"),
           verbatimTextOutput("silhouette_stability_status")
+        )
+      )
+    ),
+    tabPanel(
+      "Silhouette vs. neighborhood purity",
+      sidebarLayout(
+        sidebarPanel(
+          width = 4,
+          helpText("For all selected methods, summarize each cluster with median barcode-level silhouette width and neighborhood purity. Points use the selected blue-white-red color ramp, and axes are zoomed to the observed cluster-summary range. Hover over a point to see the cluster id, cluster stability, cluster size, median silhouette width, and median neighborhood purity."),
+          selectInput(
+            "silhouette_purity_color",
+            "Color ramp",
+            choices = c(
+              "Cluster size" = "cluster_size",
+              "Cluster stability" = "median_max_jaccard"
+            ),
+            selected = "cluster_size"
+          ),
+          actionButton("refresh_silhouette_purity", "Refresh method list"),
+          downloadButton("download_silhouette_purity_pdf", "Download hi-res PDF")
+        ),
+        mainPanel(
+          width = 8,
+          uiOutput("silhouette_purity_error"),
+          uiOutput("silhouette_purity_plot_ui"),
+          verbatimTextOutput("silhouette_purity_status")
         )
       )
     ),
@@ -770,8 +826,9 @@ ui <- fluidPage(
 )
 
 server <- function(input, output, session) {
-  silhouette_metric_choices <- c(
+  cluster_stat_metric_choices <- c(
     "Median silhouette width" = "median_silhouette",
+    "Median neighborhood purity" = "median_neighborhood_purity",
     "Cluster stability" = "median_max_jaccard",
     "Cluster size" = "cluster_size"
   )
@@ -891,12 +948,19 @@ server <- function(input, output, session) {
       selected_silhouette_biplot_method1 <- if (!is.null(current_silhouette_biplot_method1) && current_silhouette_biplot_method1 %in% pairs$rds) current_silhouette_biplot_method1 else ""
       selected_silhouette_biplot_method2 <- if (!is.null(current_silhouette_biplot_method2) && current_silhouette_biplot_method2 %in% pairs$rds) current_silhouette_biplot_method2 else ""
 
+      current_neighborhood_purity_biplot_method1 <- isolate(input$neighborhood_purity_biplot_method1)
+      current_neighborhood_purity_biplot_method2 <- isolate(input$neighborhood_purity_biplot_method2)
+      selected_neighborhood_purity_biplot_method1 <- if (!is.null(current_neighborhood_purity_biplot_method1) && current_neighborhood_purity_biplot_method1 %in% pairs$rds) current_neighborhood_purity_biplot_method1 else ""
+      selected_neighborhood_purity_biplot_method2 <- if (!is.null(current_neighborhood_purity_biplot_method2) && current_neighborhood_purity_biplot_method2 %in% pairs$rds) current_neighborhood_purity_biplot_method2 else ""
+
       updateSelectInput(session, "method1", choices = choice_map_with_blank, selected = selected_method1)
       updateSelectInput(session, "method2", choices = choice_map_with_blank, selected = selected_method2)
       updateSelectInput(session, "jaccard_method1", choices = choice_map, selected = selected_jaccard_method1)
       updateSelectInput(session, "jaccard_method2", choices = choice_map, selected = selected_jaccard_method2)
       updateSelectInput(session, "silhouette_biplot_method1", choices = choice_map_with_blank, selected = selected_silhouette_biplot_method1)
       updateSelectInput(session, "silhouette_biplot_method2", choices = choice_map_with_blank, selected = selected_silhouette_biplot_method2)
+      updateSelectInput(session, "neighborhood_purity_biplot_method1", choices = choice_map_with_blank, selected = selected_neighborhood_purity_biplot_method1)
+      updateSelectInput(session, "neighborhood_purity_biplot_method2", choices = choice_map_with_blank, selected = selected_neighborhood_purity_biplot_method2)
     } else {
       updateSelectInput(session, "method1", choices = c("Choose a method" = ""), selected = "")
       updateSelectInput(session, "method2", choices = c("Choose a method" = ""), selected = "")
@@ -904,6 +968,8 @@ server <- function(input, output, session) {
       updateSelectInput(session, "jaccard_method2", choices = c())
       updateSelectInput(session, "silhouette_biplot_method1", choices = c())
       updateSelectInput(session, "silhouette_biplot_method2", choices = c())
+      updateSelectInput(session, "neighborhood_purity_biplot_method1", choices = c())
+      updateSelectInput(session, "neighborhood_purity_biplot_method2", choices = c())
     }
   }
 
@@ -943,7 +1009,9 @@ server <- function(input, output, session) {
   observeEvent(input$refresh, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_jaccard, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_silhouette_biplot, refresh_choices(), ignoreInit = TRUE)
+  observeEvent(input$refresh_neighborhood_purity_biplot, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_silhouette_stability, refresh_choices(), ignoreInit = TRUE)
+  observeEvent(input$refresh_silhouette_purity, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_silhouette_tree, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_config, refresh_choices(), ignoreInit = TRUE)
   observeEvent(input$refresh_upset, refresh_choices(), ignoreInit = TRUE)
@@ -1121,6 +1189,21 @@ server <- function(input, output, session) {
     )
   })
 
+  loaded_neighborhood_purity_biplot_data <- reactive({
+    req(input$neighborhood_purity_biplot_method1, input$neighborhood_purity_biplot_method2)
+
+    validate(
+      need(input$neighborhood_purity_biplot_method1 != input$neighborhood_purity_biplot_method2, "Pick two different methods."),
+      need(file.exists(input$neighborhood_purity_biplot_method1), "Method 1 file does not exist."),
+      need(file.exists(input$neighborhood_purity_biplot_method2), "Method 2 file does not exist.")
+    )
+
+    list(
+      meta1 = read_seurat_neighborhood_purity_meta(input$neighborhood_purity_biplot_method1),
+      meta2 = read_seurat_neighborhood_purity_meta(input$neighborhood_purity_biplot_method2)
+    )
+  })
+
   all_method_data <- reactive({
     pairs <- method_pairs()
     label_map <- method_labels()
@@ -1188,6 +1271,8 @@ server <- function(input, output, session) {
       updateSelectInput(session, "jaccard_method2", choices = c())
       updateSelectInput(session, "silhouette_biplot_method1", choices = c("Choose a method" = ""), selected = "")
       updateSelectInput(session, "silhouette_biplot_method2", choices = c("Choose a method" = ""), selected = "")
+      updateSelectInput(session, "neighborhood_purity_biplot_method1", choices = c("Choose a method" = ""), selected = "")
+      updateSelectInput(session, "neighborhood_purity_biplot_method2", choices = c("Choose a method" = ""), selected = "")
       return()
     }
 
@@ -1205,6 +1290,8 @@ server <- function(input, output, session) {
     updateSelectInput(session, "jaccard_method2", choices = choice_map, selected = isolate(input$jaccard_method2))
     updateSelectInput(session, "silhouette_biplot_method1", choices = c("Choose a method" = "", choice_map), selected = isolate(input$silhouette_biplot_method1))
     updateSelectInput(session, "silhouette_biplot_method2", choices = c("Choose a method" = "", choice_map), selected = isolate(input$silhouette_biplot_method2))
+    updateSelectInput(session, "neighborhood_purity_biplot_method1", choices = c("Choose a method" = "", choice_map), selected = isolate(input$neighborhood_purity_biplot_method1))
+    updateSelectInput(session, "neighborhood_purity_biplot_method2", choices = c("Choose a method" = "", choice_map), selected = isolate(input$neighborhood_purity_biplot_method2))
   })
 
   output$gene_symbol_datalist <- renderUI({
@@ -1307,6 +1394,39 @@ server <- function(input, output, session) {
     )
   })
 
+  silhouette_purity_plot_obj <- reactive({
+    methods <- all_method_data()
+    req(input$silhouette_purity_color)
+
+    validate(
+      need(length(methods) > 0, "No valid method pairs found in ./data.")
+    )
+
+    SilhouetteVsNeighborhoodPurityPlot(
+      meta_list = purrr::map(methods, "meta"),
+      downsamp_list = purrr::map(methods, "bootstraps"),
+      method_labels = purrr::map_chr(methods, "label"),
+      color_metric = input$silhouette_purity_color,
+      max_columns = 3
+    )
+  })
+
+  silhouette_purity_layout <- reactive({
+    methods <- all_method_data()
+    facet_cols <- min(3L, max(1L, length(methods)))
+    facet_rows <- if (length(methods) == 0) 1L else ceiling(length(methods) / facet_cols)
+    plot_height_px <- max(620L, 290L * facet_rows)
+    viewport_height_px <- min(900L, plot_height_px)
+
+    list(
+      n_methods = length(methods),
+      facet_cols = facet_cols,
+      facet_rows = facet_rows,
+      plot_height_px = plot_height_px,
+      viewport_height_px = viewport_height_px
+    )
+  })
+
   stability_error_message <- reactive({
     if (workflows_confirmed() || !identical(input$analysis_tabs, "Inter vs. intra-cluster stability")) {
       return(NULL)
@@ -1394,8 +1514,28 @@ server <- function(input, output, session) {
     })$error
   })
 
+  neighborhood_purity_biplot_error_message <- reactive({
+    if (workflows_confirmed() || !identical(input$analysis_tabs, "Neighborhood purity biplot")) {
+      return(NULL)
+    }
+
+    capture_condition_message({
+      dat <- loaded_neighborhood_purity_biplot_data()
+      label_map <- method_labels()
+      label1 <- resolve_method_label(label_map, input$neighborhood_purity_biplot_method1)
+      label2 <- resolve_method_label(label_map, input$neighborhood_purity_biplot_method2)
+
+      neighborhood_purity_biplot(
+        meta1 = dat$meta1,
+        meta2 = dat$meta2,
+        name1 = label1,
+        name2 = label2
+      )
+    })$error
+  })
+
   silhouette_stability_error_message <- reactive({
-    if (workflows_confirmed() || !identical(input$analysis_tabs, "Cluster stability, silhouette width, and size")) {
+    if (workflows_confirmed() || !identical(input$analysis_tabs, "Multi-method cluster stats")) {
       return(NULL)
     }
 
@@ -1414,6 +1554,23 @@ server <- function(input, output, session) {
         x_metric = metrics[["x"]],
         y_metric = metrics[["y"]],
         color_metric = metrics[["color"]]
+      )
+    })$error
+  })
+
+  silhouette_purity_error_message <- reactive({
+    if (workflows_confirmed() || !identical(input$analysis_tabs, "Silhouette vs. neighborhood purity")) {
+      return(NULL)
+    }
+
+    capture_condition_message({
+      methods <- all_method_data()
+
+      SilhouetteVsNeighborhoodPurityPlot(
+        meta_list = purrr::map(methods, "meta"),
+        downsamp_list = purrr::map(methods, "bootstraps"),
+        method_labels = purrr::map_chr(methods, "label"),
+        color_metric = input$silhouette_purity_color
       )
     })$error
   })
@@ -1464,8 +1621,16 @@ server <- function(input, output, session) {
     render_tab_error_box(silhouette_biplot_error_message())
   })
 
+  output$neighborhood_purity_biplot_error <- renderUI({
+    render_tab_error_box(neighborhood_purity_biplot_error_message())
+  })
+
   output$silhouette_stability_error <- renderUI({
     render_tab_error_box(silhouette_stability_error_message())
+  })
+
+  output$silhouette_purity_error <- renderUI({
+    render_tab_error_box(silhouette_purity_error_message())
   })
 
   output$silhouette_stability_plot_ui <- renderUI({
@@ -1479,6 +1644,26 @@ server <- function(input, output, session) {
       plotOutput(
         "silhouette_stability_plot",
         height = paste0(layout$plot_height_px, "px")
+      )
+    )
+  })
+
+  output$silhouette_purity_plot_ui <- renderUI({
+    layout <- silhouette_purity_layout()
+
+    shiny::div(
+      style = paste0(
+        "max-height:", layout$viewport_height_px, "px;",
+        "overflow-y:auto; overflow-x:hidden; border:1px solid #ddd; padding:6px 8px 0 0;"
+      ),
+      tags$div(
+        style = "position: relative;",
+        plotOutput(
+          "silhouette_purity_plot",
+          height = paste0(layout$plot_height_px, "px"),
+          hover = hoverOpts("silhouette_purity_hover", delay = 80, delayType = "debounce")
+        ),
+        uiOutput("silhouette_purity_hover_tooltip")
       )
     )
   })
@@ -1589,10 +1774,142 @@ server <- function(input, output, session) {
     )
   }, res = 110)
 
+  output$neighborhood_purity_biplot_plot <- renderPlot({
+    req(is.null(neighborhood_purity_biplot_error_message()))
+    dat <- loaded_neighborhood_purity_biplot_data()
+    label_map <- method_labels()
+    label1 <- resolve_method_label(label_map, input$neighborhood_purity_biplot_method1)
+    label2 <- resolve_method_label(label_map, input$neighborhood_purity_biplot_method2)
+
+    neighborhood_purity_biplot(
+      meta1 = dat$meta1,
+      meta2 = dat$meta2,
+      name1 = label1,
+      name2 = label2
+    )
+  }, res = 110)
+
   output$silhouette_stability_plot <- renderPlot({
     req(is.null(silhouette_stability_error_message()))
     silhouette_stability_plot_obj()
   }, res = 110)
+
+  output$silhouette_purity_plot <- renderPlot({
+    req(is.null(silhouette_purity_error_message()))
+    silhouette_purity_plot_obj()
+  }, res = 110)
+
+  silhouette_purity_hover_data <- reactive({
+    req(is.null(silhouette_purity_error_message()))
+    req(input$silhouette_purity_color)
+    methods <- all_method_data()
+
+    validate(
+      need(length(methods) > 0, "No valid method pairs found in ./data.")
+    )
+
+    build_silhouette_purity_plot_data(
+      meta_list = purrr::map(methods, "meta"),
+      downsamp_list = purrr::map(methods, "bootstraps"),
+      method_labels = purrr::map_chr(methods, "label"),
+      color_metric = input$silhouette_purity_color,
+      max_columns = 3
+    )$cluster_summary
+  })
+
+  silhouette_purity_hover_info <- reactive({
+    hover <- input$silhouette_purity_hover
+
+    if (
+      is.null(hover) ||
+      is.null(hover$x) ||
+      is.null(hover$y) ||
+      is.null(hover$coords_css$x) ||
+      is.null(hover$coords_css$y)
+    ) {
+      return(NULL)
+    }
+
+    point_data <- silhouette_purity_hover_data()
+    if (!is.null(hover$panelvar1)) {
+      facet_value <- hover$panelvar1
+      if (is.list(facet_value)) {
+        facet_value <- unlist(facet_value, use.names = FALSE)[[1]]
+      }
+      point_data <- point_data %>%
+        dplyr::filter(as.character(.data$method_display) == as.character(facet_value))
+    }
+
+    hovered_point <- shiny::nearPoints(
+      point_data,
+      hover,
+      xvar = "median_silhouette",
+      yvar = "median_neighborhood_purity",
+      threshold = 16,
+      maxpoints = 1,
+      addDist = TRUE
+    )
+
+    if (nrow(hovered_point) == 0) {
+      return(NULL)
+    }
+
+    list(
+      point = hovered_point[1, , drop = FALSE],
+      hover = hover
+    )
+  })
+
+  output$silhouette_purity_hover_tooltip <- renderUI({
+    req(is.null(silhouette_purity_error_message()))
+    hover_info <- silhouette_purity_hover_info()
+
+    if (is.null(hover_info)) {
+      return(NULL)
+    }
+
+    point <- hover_info$point
+    format_value <- function(value, accuracy = 0.001) {
+      if (length(value) == 0 || is.na(value) || !is.finite(value)) {
+        return("NA")
+      }
+
+      scales::number(value, accuracy = accuracy, trim = TRUE)
+    }
+    format_count <- function(value) {
+      if (length(value) == 0 || is.na(value) || !is.finite(value)) {
+        return("NA")
+      }
+
+      scales::number(value, accuracy = 1, big.mark = "", trim = TRUE)
+    }
+
+    stability_value <- if ("median_max_jaccard" %in% names(point)) point$median_max_jaccard[[1]] else NA_real_
+
+    tags$div(
+      style = paste(
+        "position:absolute;",
+        sprintf("left:%spx;", hover_info$hover$coords_css$x + 12),
+        sprintf("top:%spx;", hover_info$hover$coords_css$y + 12),
+        "pointer-events:none;",
+        "background:rgba(255,255,255,0.97);",
+        "border:1px solid #bdbdbd;",
+        "border-radius:4px;",
+        "padding:7px 9px;",
+        "font-size:12px;",
+        "line-height:1.35;",
+        "min-width:230px;",
+        "box-shadow:0 2px 8px rgba(0,0,0,0.14);",
+        "z-index:10;",
+        sep = " "
+      ),
+      tags$div(tags$strong(paste0("Cluster ", point$clusterid[[1]]))),
+      tags$div(paste0("Cluster stability: ", format_value(stability_value))),
+      tags$div(paste0("Cluster size: ", format_count(point$cluster_size[[1]]))),
+      tags$div(paste0("Median silhouette width: ", format_value(point$median_silhouette[[1]]))),
+      tags$div(paste0("Median neighborhood purity: ", format_value(point$median_neighborhood_purity[[1]])))
+    )
+  })
 
   output$silhouette_tree_plot <- renderPlot({
     req(is.null(silhouette_tree_error_message()))
@@ -1701,9 +2018,38 @@ server <- function(input, output, session) {
     }
   )
 
+  output$download_neighborhood_purity_biplot_pdf <- downloadHandler(
+    filename = function() {
+      label_map <- method_labels()
+      paste0(
+        "neighborhood-purity-biplot-",
+        gsub("[^A-Za-z0-9_-]+", "-", resolve_method_label(label_map, input$neighborhood_purity_biplot_method1)),
+        "-vs-",
+        gsub("[^A-Za-z0-9_-]+", "-", resolve_method_label(label_map, input$neighborhood_purity_biplot_method2)),
+        ".pdf"
+      )
+    },
+    content = function(file) {
+      dat <- loaded_neighborhood_purity_biplot_data()
+      label_map <- method_labels()
+      label1 <- resolve_method_label(label_map, input$neighborhood_purity_biplot_method1)
+      label2 <- resolve_method_label(label_map, input$neighborhood_purity_biplot_method2)
+
+      grDevices::pdf(file, width = 8.5, height = 7.5, onefile = TRUE)
+      on.exit(grDevices::dev.off(), add = TRUE)
+      print(neighborhood_purity_biplot(
+        meta1 = dat$meta1,
+        meta2 = dat$meta2,
+        name1 = label1,
+        name2 = label2,
+        for_pdf = TRUE
+      ))
+    }
+  )
+
   output$download_silhouette_stability_pdf <- downloadHandler(
     filename = function() {
-      paste0("cluster-silhouette-vs-stability-", format(Sys.Date(), "%Y%m%d"), ".pdf")
+      paste0("multi-method-cluster-stats-", format(Sys.Date(), "%Y%m%d"), ".pdf")
     },
     content = function(file) {
       methods <- all_method_data()
@@ -1731,6 +2077,40 @@ server <- function(input, output, session) {
             x_metric = metrics[["x"]],
             y_metric = metrics[["y"]],
             color_metric = metrics[["color"]],
+            for_pdf = TRUE,
+            max_columns = 3
+          )
+        )
+      })
+    }
+  )
+
+  output$download_silhouette_purity_pdf <- downloadHandler(
+    filename = function() {
+      paste0("silhouette-vs-neighborhood-purity-", format(Sys.Date(), "%Y%m%d"), ".pdf")
+    },
+    content = function(file) {
+      methods <- all_method_data()
+
+      validate(
+        need(length(methods) > 0, "No valid method pairs found in ./data.")
+      )
+
+      page_method_count <- 9L
+      page_indices <- split(seq_along(methods), ceiling(seq_along(methods) / page_method_count))
+
+      grDevices::pdf(file, width = 10, height = 10, onefile = TRUE)
+      on.exit(grDevices::dev.off(), add = TRUE)
+
+      purrr::walk(page_indices, function(idx) {
+        page_methods <- methods[idx]
+
+        print(
+          SilhouetteVsNeighborhoodPurityPlot(
+            meta_list = purrr::map(page_methods, "meta"),
+            downsamp_list = purrr::map(page_methods, "bootstraps"),
+            method_labels = purrr::map_chr(page_methods, "label"),
+            color_metric = input$silhouette_purity_color,
             for_pdf = TRUE,
             max_columns = 3
           )
@@ -2003,17 +2383,56 @@ server <- function(input, output, session) {
     paste0(
       "Loaded ",
       length(methods),
-      " methods for the silhouette-vs-stability comparison, spanning ",
+      " methods for the multi-method cluster stats comparison, spanning ",
       cluster_total,
       " clusters across the selected method set. Mapping: x = ",
-      names(silhouette_metric_choices)[match(metrics[["x"]], silhouette_metric_choices)],
+      names(cluster_stat_metric_choices)[match(metrics[["x"]], cluster_stat_metric_choices)],
       ", y = ",
-      names(silhouette_metric_choices)[match(metrics[["y"]], silhouette_metric_choices)],
+      names(cluster_stat_metric_choices)[match(metrics[["y"]], cluster_stat_metric_choices)],
       ", color = ",
-      names(silhouette_metric_choices)[match(metrics[["color"]], silhouette_metric_choices)],
+      names(cluster_stat_metric_choices)[match(metrics[["color"]], cluster_stat_metric_choices)],
       "."
     )
   })
+
+	  output$silhouette_purity_status <- renderText({
+	    if (!workflows_confirmed() && !is.null(silhouette_purity_error_message())) {
+	      return(paste0("Full error message:\n", silhouette_purity_error_message()))
+	    }
+
+	    methods <- if (workflows_confirmed()) all_method_data() else all_method_data_safe()$result
+	    color_label <- if (identical(input$silhouette_purity_color, "median_max_jaccard")) {
+	      "Cluster stability"
+	    } else {
+	      "Cluster size"
+	    }
+	    purity_summary_counts <- methods %>%
+	      purrr::map("meta") %>%
+      purrr::map(function(meta_tbl) {
+        if (!all(c("seurat_clusters", "silhouette_width", "neighborhood_purity") %in% names(meta_tbl))) {
+          return(c(clusters = 0L, barcodes = 0L))
+        }
+
+        complete_rows <- stats::complete.cases(meta_tbl[, c("seurat_clusters", "silhouette_width", "neighborhood_purity"), drop = FALSE])
+        c(
+          clusters = dplyr::n_distinct(meta_tbl$seurat_clusters[complete_rows]),
+          barcodes = sum(complete_rows)
+        )
+      }) %>%
+      do.call(what = rbind)
+
+    paste0(
+      "Loaded ",
+      length(methods),
+      " selected methods with ",
+      scales::comma(sum(purity_summary_counts[, "clusters"])),
+      " cluster median summaries from ",
+	      scales::comma(sum(purity_summary_counts[, "barcodes"])),
+	      " barcode-level observations containing cluster, silhouette width, and neighborhood purity. Color ramp = ",
+	      color_label,
+	      "."
+	    )
+	  })
 
   output$silhouette_biplot_status <- renderText({
     if (!workflows_confirmed() && !is.null(silhouette_biplot_error_message())) {
@@ -2024,19 +2443,46 @@ server <- function(input, output, session) {
     label_map <- method_labels()
     label1 <- resolve_method_label(label_map, input$silhouette_biplot_method1)
     label2 <- resolve_method_label(label_map, input$silhouette_biplot_method2)
-    shared_barcodes <- length(intersect(rownames(dat$meta1), rownames(dat$meta2)))
-    union_barcodes <- length(union(rownames(dat$meta1), rownames(dat$meta2)))
+    shared_barcodes <- intersect(rownames(dat$meta1), rownames(dat$meta2))
+    plotted_barcodes <- sum(stats::complete.cases(data.frame(
+      method1 = dat$meta1[shared_barcodes, "silhouette_width", drop = TRUE],
+      method2 = dat$meta2[shared_barcodes, "silhouette_width", drop = TRUE]
+    )))
 
     paste0(
       "Comparing cell-level silhouette widths for ",
       label1,
       " vs ",
       label2,
-      ". Shared barcodes: ",
-      shared_barcodes,
-      " of ",
-      union_barcodes,
-      " total in the union. Missing-barcode values are plotted at -1."
+      ". Plotted shared barcodes with non-missing silhouette widths: ",
+      plotted_barcodes,
+      ". Barcodes found in only one method are excluded."
+    )
+  })
+
+  output$neighborhood_purity_biplot_status <- renderText({
+    if (!workflows_confirmed() && !is.null(neighborhood_purity_biplot_error_message())) {
+      return(paste0("Full error message:\n", neighborhood_purity_biplot_error_message()))
+    }
+
+    dat <- loaded_neighborhood_purity_biplot_data()
+    label_map <- method_labels()
+    label1 <- resolve_method_label(label_map, input$neighborhood_purity_biplot_method1)
+    label2 <- resolve_method_label(label_map, input$neighborhood_purity_biplot_method2)
+    shared_barcodes <- intersect(rownames(dat$meta1), rownames(dat$meta2))
+    plotted_barcodes <- sum(stats::complete.cases(data.frame(
+      method1 = dat$meta1[shared_barcodes, "neighborhood_purity", drop = TRUE],
+      method2 = dat$meta2[shared_barcodes, "neighborhood_purity", drop = TRUE]
+    )))
+
+    paste0(
+      "Comparing cell-level neighborhood purity for ",
+      label1,
+      " vs ",
+      label2,
+      ". Plotted shared barcodes with non-missing neighborhood purity: ",
+      plotted_barcodes,
+      ". Barcodes found in only one method are excluded."
     )
   })
 
