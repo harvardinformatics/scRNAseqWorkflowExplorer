@@ -4,6 +4,153 @@ jaccard_similarity <- function(set1, set2) {
   intersect_length / union_length
 }
 
+render_method_strip_label <- function(label, target_width, min_font_size, base_font_size, max_lines = 3) {
+  label <- stringr::str_squish(as.character(label))
+
+  if (!nzchar(label)) {
+    return(label)
+  }
+
+  split_for_strip <- function(text) {
+    text %>%
+      stringr::str_replace_all("([+_-])", "\\1 ") %>%
+      stringr::str_squish() %>%
+      stringr::str_split("\\s+", simplify = FALSE) %>%
+      purrr::pluck(1)
+  }
+
+  single_line_size <- base_font_size * target_width / max(1, nchar(label))
+  tokens <- split_for_strip(label)
+  has_break_opportunity <- length(tokens) > 1
+
+  should_keep_single_line <- single_line_size >= min_font_size && nchar(label) <= target_width * 0.9
+  if (should_keep_single_line) {
+    return(label)
+  }
+
+  if (!has_break_opportunity) {
+    return(label)
+  }
+
+  token_count <- length(tokens)
+  max_breaks <- min(max_lines - 1, token_count - 1)
+
+  if (max_breaks <= 0) {
+    return(label)
+  }
+
+  best_label <- label
+  best_score <- Inf
+
+  for (break_count in seq_len(max_breaks)) {
+    break_sets <- combn(token_count - 1, break_count, simplify = FALSE)
+
+    for (breaks in break_sets) {
+      starts <- c(1, breaks + 1)
+      ends <- c(breaks, token_count)
+      lines <- purrr::map2_chr(starts, ends, ~ paste(tokens[.x:.y], collapse = " ")) %>%
+        stringr::str_replace_all("\\s+([+_-])$", "\\1")
+      longest_line <- max(nchar(lines), na.rm = TRUE)
+      wrapped_size <- base_font_size * target_width / max(1, longest_line)
+
+      if (wrapped_size < min_font_size && wrapped_size <= single_line_size) {
+        next
+      }
+
+      score <- sum((target_width - nchar(lines))^2) + break_count * 8 - wrapped_size * 6
+
+      if (score < best_score) {
+        best_score <- score
+        best_label <- paste(lines, collapse = "\n")
+      }
+    }
+  }
+
+  best_label
+}
+
+build_method_strip_labels <- function(method_labels, facet_cols, for_pdf = FALSE) {
+  base_strip_size <- if (for_pdf) 11 else 10
+  min_strip_size <- if (for_pdf) 8.5 else 8
+  target_line_chars <- max(22, floor(if (for_pdf) 56 / facet_cols else 50 / facet_cols))
+
+  label_line_width <- function(label) {
+    lines <- stringr::str_split(as.character(label), "\n", simplify = FALSE)[[1]]
+    max(nchar(lines), na.rm = TRUE)
+  }
+
+  candidate_labels <- purrr::map(
+    1:3,
+    ~ purrr::map_chr(
+      method_labels,
+      render_method_strip_label,
+      target_width = target_line_chars,
+      min_font_size = min_strip_size,
+      base_font_size = base_strip_size,
+      max_lines = .x
+    )
+  )
+  candidate_longest_lines <- purrr::map_dbl(candidate_labels, ~ max(purrr::map_int(.x, label_line_width), na.rm = TRUE))
+  candidate_sizes <- purrr::map_dbl(
+    candidate_longest_lines,
+    ~ min(base_strip_size, base_strip_size * target_line_chars / max(1, .x))
+  )
+  chosen_idx <- which(candidate_sizes >= min_strip_size)[1]
+  allow_below_min_strip_size <- is.na(chosen_idx)
+  if (is.na(chosen_idx)) {
+    chosen_idx <- which.max(candidate_sizes)
+  }
+
+  rendered_method_labels <- candidate_labels[[chosen_idx]]
+  longest_rendered_line <- candidate_longest_lines[[chosen_idx]]
+  strip_text_size <- min(base_strip_size, base_strip_size * target_line_chars / max(1, longest_rendered_line))
+  if (!allow_below_min_strip_size) {
+    strip_text_size <- max(min_strip_size, strip_text_size)
+  }
+
+  list(
+    labels = rendered_method_labels,
+    text_size = strip_text_size
+  )
+}
+
+build_observed_diverging_scale <- function(values, color_metric) {
+  valid_values <- is.finite(values)
+  if (any(valid_values)) {
+    observed_limits <- range(values[valid_values], na.rm = TRUE)
+  } else {
+    observed_limits <- c(0, 1)
+  }
+
+  scale_limits <- observed_limits
+  midpoint <- mean(observed_limits)
+  breaks <- c(observed_limits[[1]], midpoint, observed_limits[[2]])
+  labeler <- if (identical(color_metric, "cluster_size")) {
+    scales::label_number(accuracy = 1, big.mark = "", trim = TRUE)
+  } else {
+    scales::label_number(accuracy = 0.001, trim = TRUE)
+  }
+  labels <- labeler(breaks)
+
+  if (diff(observed_limits) == 0) {
+    padding <- if (identical(color_metric, "cluster_size")) {
+      1
+    } else {
+      max(0.001, abs(scale_limits[[1]]) * 0.01)
+    }
+    scale_limits <- observed_limits + c(-padding, padding)
+    breaks <- midpoint
+    labels <- labeler(midpoint)
+  }
+
+  list(
+    limits = scale_limits,
+    midpoint = midpoint,
+    breaks = breaks,
+    labels = labels
+  )
+}
+
 make_shared_barcodes_upset_plot <- function(barcode_sets, method_names = NULL, min_size = 1, for_pdf = FALSE) {
   if (is.null(names(barcode_sets)) && is.null(method_names)) {
     stop("Provide `method_names` or a named list of barcode vectors.")
@@ -936,68 +1083,54 @@ MakeInterVsIntraStablePlot <- function(meta1, meta2,
     )
 }
 
-silhouette_width_biplot <- function(meta1, meta2, name1, name2, for_pdf = FALSE) {
-  required_meta_cols <- "silhouette_width"
+cell_metric_biplot <- function(meta1, meta2, name1, name2, metric_col, plot_title,
+                               difference_title, difference_xlim, difference_breaks,
+                               axis_limits = c(-1, 1),
+                               for_pdf = FALSE) {
+  required_meta_cols <- metric_col
   missing_meta1 <- setdiff(required_meta_cols, names(meta1))
   missing_meta2 <- setdiff(required_meta_cols, names(meta2))
 
   if (length(missing_meta1) > 0) {
-    stop("Metadata for method `", name1, "` is missing required column `silhouette_width`.")
+    stop("Metadata for method `", name1, "` is missing required column `", metric_col, "`.")
   }
 
   if (length(missing_meta2) > 0) {
-    stop("Metadata for method `", name2, "` is missing required column `silhouette_width`.")
+    stop("Metadata for method `", name2, "` is missing required column `", metric_col, "`.")
   }
 
-  sil1 <- tibble::tibble(
+  metric1 <- tibble::tibble(
     barcode = rownames(meta1),
-    silhouette_1 = as.numeric(meta1$silhouette_width)
+    metric_1 = as.numeric(meta1[[metric_col]])
   )
 
-  sil2 <- tibble::tibble(
+  metric2 <- tibble::tibble(
     barcode = rownames(meta2),
-    silhouette_2 = as.numeric(meta2$silhouette_width)
+    metric_2 = as.numeric(meta2[[metric_col]])
   )
 
-  plot_df <- dplyr::full_join(sil1, sil2, by = "barcode") %>%
-    dplyr::mutate(
-      barcode_status = dplyr::case_when(
-        !is.na(silhouette_1) & !is.na(silhouette_2) ~ "Shared barcode",
-        !is.na(silhouette_1) & is.na(silhouette_2) ~ "Missing from one method",
-        is.na(silhouette_1) & !is.na(silhouette_2) ~ "Missing from one method",
-        TRUE ~ "Missing in both"
-      ),
-      silhouette_1 = dplyr::if_else(is.na(silhouette_1), -1, silhouette_1),
-      silhouette_2 = dplyr::if_else(is.na(silhouette_2), -1, silhouette_2)
-    ) %>%
-    dplyr::filter(.data$barcode_status != "Missing in both")
+  plot_df <- dplyr::inner_join(metric1, metric2, by = "barcode") %>%
+    dplyr::filter(!is.na(.data$metric_1), !is.na(.data$metric_2))
 
   if (nrow(plot_df) == 0) {
-    stop("No cell barcodes were available for the selected methods.")
+    stop("No shared cell barcodes had non-missing values for the selected methods.")
   }
 
   smooth_df <- plot_df %>%
-    dplyr::filter(.data$barcode_status == "Shared barcode") %>%
-    dplyr::mutate(silhouette_delta = .data$silhouette_2 - .data$silhouette_1)
-
-  status_levels <- c("Shared barcode", "Missing from one method")
-  palette_values <- c(
-    "Shared barcode" = "#1f78b4",
-    "Missing from one method" = "grey60"
-  )
+    dplyr::mutate(metric_delta = .data$metric_2 - .data$metric_1)
 
   point_size <- if (for_pdf) 0.55 else 0.45
   alpha_value <- 0.15
-  smooth_df_value <- min(4L, max(1L, dplyr::n_distinct(smooth_df$silhouette_1) - 1L))
+  smooth_df_value <- min(4L, max(1L, dplyr::n_distinct(smooth_df$metric_1) - 1L))
   smooth_formula <- if (smooth_df_value >= 2L) {
     stats::as.formula(paste0("y ~ splines::ns(x, df = ", smooth_df_value, ")"))
   } else {
     y ~ x
   }
-  smooth_layer <- if (nrow(smooth_df) >= 2 && dplyr::n_distinct(smooth_df$silhouette_1) >= 2) {
+  smooth_layer <- if (nrow(smooth_df) >= 2 && dplyr::n_distinct(smooth_df$metric_1) >= 2) {
     ggplot2::geom_smooth(
       data = smooth_df,
-      mapping = ggplot2::aes(x = silhouette_1, y = silhouette_2),
+      mapping = ggplot2::aes(x = metric_1, y = metric_2),
       inherit.aes = FALSE,
       method = "lm",
       formula = smooth_formula,
@@ -1008,8 +1141,9 @@ silhouette_width_biplot <- function(meta1, meta2, name1, name2, for_pdf = FALSE)
   } else {
     NULL
   }
+  axis_span <- diff(axis_limits)
   inset_layer <- if (nrow(smooth_df) > 0) {
-    inset_histogram <- ggplot2::ggplot(smooth_df, ggplot2::aes(x = silhouette_delta)) +
+    inset_histogram <- ggplot2::ggplot(smooth_df, ggplot2::aes(x = metric_delta)) +
       ggplot2::geom_histogram(
         bins = 30,
         boundary = 0,
@@ -1018,30 +1152,30 @@ silhouette_width_biplot <- function(meta1, meta2, name1, name2, for_pdf = FALSE)
         linewidth = 0.2
       ) +
       ggplot2::geom_vline(xintercept = 0, color = "red", linewidth = if (for_pdf) 0.45 else 0.4) +
-      ggplot2::scale_x_continuous(breaks = c(-1, 0, 1)) +
-      ggplot2::coord_cartesian(xlim = c(-2, 2)) +
+      ggplot2::scale_x_continuous(breaks = difference_breaks) +
+      ggplot2::coord_cartesian(xlim = difference_xlim) +
       ggplot2::labs(
-        title = "Silhouette difference",
+        title = difference_title,
         x = "Method 2 - Method 1",
         y = "Cells"
       ) +
-      ggplot2::theme_bw(base_size = if (for_pdf) 6.5 else 6) +
+      ggplot2::theme_classic(base_size = if (for_pdf) 6.5 else 6) +
       ggplot2::theme(
         plot.title = ggplot2::element_text(face = "bold", size = if (for_pdf) 7.5 else 7),
         axis.title = ggplot2::element_text(size = if (for_pdf) 6.5 else 6),
         axis.text = ggplot2::element_text(size = if (for_pdf) 5.5 else 5),
         panel.grid.minor = ggplot2::element_blank(),
-        panel.grid.major = ggplot2::element_line(color = "grey90", linewidth = 0.2),
+        panel.grid.major = ggplot2::element_blank(),
         plot.background = ggplot2::element_rect(fill = "white", color = "grey30", linewidth = 0.3),
         plot.margin = ggplot2::margin(3, 4, 3, 4)
       )
 
     ggplot2::annotation_custom(
       grob = ggplot2::ggplotGrob(inset_histogram),
-      xmin = -0.98,
-      xmax = -0.04,
-      ymin = 0.44,
-      ymax = 1.08
+      xmin = axis_limits[[1]] + 0.01 * axis_span,
+      xmax = axis_limits[[1]] + 0.48 * axis_span,
+      ymin = axis_limits[[1]] + 0.72 * axis_span,
+      ymax = axis_limits[[1]] + 1.04 * axis_span
     )
   } else {
     NULL
@@ -1050,43 +1184,343 @@ silhouette_width_biplot <- function(meta1, meta2, name1, name2, for_pdf = FALSE)
   ggplot2::ggplot(
     plot_df,
     ggplot2::aes(
-      x = silhouette_1,
-      y = silhouette_2,
-      color = factor(barcode_status, levels = status_levels)
+      x = metric_1,
+      y = metric_2
     )
   ) +
-    ggplot2::geom_vline(xintercept = -1, linetype = "dotted", color = "grey70", linewidth = 0.4) +
-    ggplot2::geom_hline(yintercept = -1, linetype = "dotted", color = "grey70", linewidth = 0.4) +
-    ggplot2::geom_point(size = point_size, alpha = alpha_value) +
+    ggplot2::geom_point(color = "#1f78b4", size = point_size, alpha = alpha_value) +
     ggplot2::geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey55", linewidth = 0.5) +
     smooth_layer +
     inset_layer +
-    ggplot2::coord_equal(xlim = c(-1, 1), ylim = c(-1, 1), expand = TRUE) +
-    ggplot2::scale_color_manual(values = palette_values, drop = FALSE, name = NULL) +
+    ggplot2::coord_equal(xlim = axis_limits, ylim = axis_limits, expand = TRUE) +
     ggplot2::labs(
-      title = "Cell-level silhouette width biplot",
-      subtitle = paste0(scales::comma(nrow(plot_df)), " cell barcodes across two methods"),
+      title = plot_title,
+      subtitle = paste0(scales::comma(nrow(plot_df)), " shared cell barcodes across two methods"),
       x = name1,
       y = name2
     ) +
-    ggplot2::theme_bw(base_size = if (for_pdf) 12 else 11) +
+    ggplot2::theme_classic(base_size = if (for_pdf) 12 else 11) +
     ggplot2::theme(
       panel.grid.minor = ggplot2::element_blank(),
       plot.title = ggplot2::element_text(face = "bold"),
-      legend.position = "bottom",
-      legend.direction = "horizontal",
-      legend.box = "horizontal",
-      legend.text = ggplot2::element_text(size = if (for_pdf) 10 else 9),
+      legend.position = "none",
       axis.title.x = ggplot2::element_text(margin = ggplot2::margin(t = 8)),
       axis.title.y = ggplot2::element_text(margin = ggplot2::margin(r = 8)),
       plot.margin = ggplot2::margin(8, 10, 8, 8)
-    ) +
-    ggplot2::guides(
-      color = ggplot2::guide_legend(
-        nrow = 1,
-        byrow = TRUE,
-        override.aes = list(size = if (for_pdf) 2.8 else 2.4, alpha = 0.9)
+    )
+}
+
+silhouette_width_biplot <- function(meta1, meta2, name1, name2, for_pdf = FALSE) {
+  cell_metric_biplot(
+    meta1 = meta1,
+    meta2 = meta2,
+    name1 = name1,
+    name2 = name2,
+    metric_col = "silhouette_width",
+    plot_title = "Cell-level silhouette width biplot",
+    difference_title = expression(paste(delta, " silhouette width")),
+    difference_xlim = c(-2, 2),
+    difference_breaks = c(-1, 0, 1),
+    axis_limits = c(-1, 1),
+    for_pdf = for_pdf
+  )
+}
+
+neighborhood_purity_biplot <- function(meta1, meta2, name1, name2, for_pdf = FALSE) {
+  cell_metric_biplot(
+    meta1 = meta1,
+    meta2 = meta2,
+    name1 = name1,
+    name2 = name2,
+    metric_col = "neighborhood_purity",
+    plot_title = "Cell-level neighborhood purity biplot",
+    difference_title = expression(paste(delta, " neighborhood purity")),
+    difference_xlim = c(-1, 1),
+    difference_breaks = c(-1, 0, 1),
+    axis_limits = c(0, 1),
+    for_pdf = for_pdf
+  )
+}
+
+build_silhouette_purity_plot_data <- function(meta_list, method_labels,
+                                              downsamp_list = NULL,
+                                              color_metric = "cluster_size",
+                                              for_pdf = FALSE,
+                                              max_columns = 3) {
+  if (length(meta_list) != length(method_labels)) {
+    stop("meta_list and method_labels must have the same length.")
+  }
+
+  if (length(meta_list) == 0) {
+    stop("Provide at least one method.")
+  }
+
+  color_specs <- list(
+    cluster_size = list(label = "Cluster size"),
+    median_max_jaccard = list(label = as.expression(expression(paste("Cluster ", stability[Jaccard]))))
+  )
+  if (is.null(color_metric) || length(color_metric) != 1 || is.na(color_metric)) {
+    color_metric <- "cluster_size"
+  }
+  if (!(color_metric %in% names(color_specs))) {
+    stop("Unknown silhouette/purity color metric selection: ", color_metric)
+  }
+
+  if (identical(color_metric, "median_max_jaccard")) {
+    if (is.null(downsamp_list) || length(downsamp_list) != length(meta_list)) {
+      stop("Provide `downsamp_list` with one bootstrap table per method to color by cluster stability.")
+    }
+  }
+  if (!is.null(downsamp_list) && length(downsamp_list) != length(meta_list)) {
+    stop("downsamp_list must have the same length as meta_list.")
+  }
+
+  display_labels <- make.unique(method_labels, sep = " ")
+  required_meta_cols <- c("seurat_clusters", "silhouette_width", "neighborhood_purity")
+  x_possible_limits <- c(-1, 1)
+  y_possible_limits <- c(0, 1)
+
+  plot_df <- purrr::map_dfr(seq_along(meta_list), function(i) {
+    meta_tbl <- meta_list[[i]]
+    missing_meta_cols <- setdiff(required_meta_cols, names(meta_tbl))
+
+    if (length(missing_meta_cols) > 0) {
+      stop(
+        "Metadata for method `",
+        method_labels[[i]],
+        "` is missing required column",
+        if (length(missing_meta_cols) > 1) "s: " else ": ",
+        paste0("`", missing_meta_cols, "`", collapse = ", "),
+        "."
       )
+    }
+
+    tibble::tibble(
+      method = display_labels[[i]],
+      barcode = rownames(meta_tbl),
+      clusterid = as.character(meta_tbl[["seurat_clusters"]]),
+      silhouette_width = as.numeric(meta_tbl[["silhouette_width"]]),
+      neighborhood_purity = as.numeric(meta_tbl[["neighborhood_purity"]])
+    )
+  }) %>%
+    dplyr::filter(
+      !is.na(.data$clusterid),
+      !is.na(.data$silhouette_width),
+      !is.na(.data$neighborhood_purity)
+    ) %>%
+    dplyr::mutate(method = factor(.data$method, levels = display_labels))
+
+  if (nrow(plot_df) == 0) {
+    stop("No cell barcodes had non-missing silhouette width and neighborhood purity values.")
+  }
+
+  cluster_levels <- arrange_cluster_levels(plot_df$clusterid)
+
+  observed_axis_limits <- function(values, fallback_limits, padding_fraction = 0.08) {
+    values <- values[is.finite(values)]
+    if (length(values) == 0) {
+      return(fallback_limits)
+    }
+
+    limits <- range(values)
+    span <- diff(limits)
+    padding <- if (span == 0) {
+      max(diff(fallback_limits) * 0.025, abs(limits[[1]]) * 0.05, 0.01)
+    } else {
+      span * padding_fraction
+    }
+
+    limits + c(-padding, padding)
+  }
+
+  cluster_summary <- plot_df %>%
+    dplyr::mutate(clusterid = factor(.data$clusterid, levels = cluster_levels)) %>%
+    dplyr::group_by(.data$method, .data$clusterid) %>%
+    dplyr::summarise(
+      n_cells = dplyr::n(),
+      cluster_size = dplyr::n(),
+      median_silhouette = stats::median(.data$silhouette_width),
+      median_neighborhood_purity = stats::median(.data$neighborhood_purity),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(clusterid = as.character(.data$clusterid))
+
+  if (!is.null(downsamp_list)) {
+    stability_df <- purrr::map_dfr(seq_along(downsamp_list), function(i) {
+      downsamp_tbl <- downsamp_list[[i]]
+      required_downsamp_cols <- c("clusterid", "max_jaccard")
+      missing_downsamp_cols <- setdiff(required_downsamp_cols, names(downsamp_tbl))
+
+      if (length(missing_downsamp_cols) > 0) {
+        stop(
+          "Downsampling summary for method `",
+          method_labels[[i]],
+          "` is missing required column",
+          if (length(missing_downsamp_cols) > 1) "s: " else ": ",
+          paste0("`", missing_downsamp_cols, "`", collapse = ", "),
+          "."
+        )
+      }
+
+      downsamp_tbl %>%
+        dplyr::mutate(
+          method = display_labels[[i]],
+          clusterid = as.character(.data$clusterid)
+        ) %>%
+        dplyr::group_by(.data$method, .data$clusterid) %>%
+        dplyr::summarise(
+          median_max_jaccard = stats::median(.data$max_jaccard, na.rm = TRUE),
+          .groups = "drop"
+        )
+    })
+
+    join_fn <- if (identical(color_metric, "median_max_jaccard")) dplyr::inner_join else dplyr::left_join
+    cluster_summary <- join_fn(cluster_summary, stability_df, by = c("method", "clusterid"))
+
+    if (nrow(cluster_summary) == 0) {
+      stop("No clusters remained after joining cluster medians with cluster stability summaries.")
+    }
+  }
+
+  color_scale <- build_observed_diverging_scale(cluster_summary[[color_metric]], color_metric)
+
+  x_limits <- observed_axis_limits(
+    cluster_summary$median_silhouette,
+    x_possible_limits
+  )
+  y_limits <- observed_axis_limits(
+    cluster_summary$median_neighborhood_purity,
+    y_possible_limits
+  )
+
+  n_methods <- length(display_labels)
+  facet_cols <- max(1, min(max_columns, n_methods))
+  strip_labels <- build_method_strip_labels(display_labels, facet_cols, for_pdf = for_pdf)
+  cluster_summary <- cluster_summary %>%
+    dplyr::mutate(
+      method_display = factor(
+        strip_labels$labels[match(as.character(.data$method), display_labels)],
+        levels = strip_labels$labels
+      )
+    )
+
+  list(
+    cluster_summary = cluster_summary,
+    plot_df = plot_df,
+    x_limits = x_limits,
+    y_limits = y_limits,
+    facet_cols = facet_cols,
+    strip_labels = strip_labels,
+    color_specs = color_specs,
+    color_scale = color_scale,
+    color_metric = color_metric
+  )
+}
+
+SilhouetteVsNeighborhoodPurityPlot <- function(meta_list, method_labels,
+                                               downsamp_list = NULL,
+                                               color_metric = "cluster_size",
+                                               for_pdf = FALSE,
+                                               max_columns = 3) {
+  plot_data <- build_silhouette_purity_plot_data(
+    meta_list = meta_list,
+    method_labels = method_labels,
+    downsamp_list = downsamp_list,
+    color_metric = color_metric,
+    for_pdf = for_pdf,
+    max_columns = max_columns
+  )
+
+  cluster_summary <- plot_data$cluster_summary
+  plot_df <- plot_data$plot_df
+  x_limits <- plot_data$x_limits
+  y_limits <- plot_data$y_limits
+  facet_cols <- plot_data$facet_cols
+  strip_labels <- plot_data$strip_labels
+  color_specs <- plot_data$color_specs
+  color_scale <- plot_data$color_scale
+  color_metric <- plot_data$color_metric
+
+  label_layer <- if (for_pdf) {
+    ggrepel::geom_text_repel(
+      ggplot2::aes(
+        x = .data$median_silhouette,
+        y = .data$median_neighborhood_purity,
+        label = as.character(.data$clusterid)
+      ),
+      inherit.aes = FALSE,
+      size = 2.8,
+      min.segment.length = 0,
+      segment.color = "grey45",
+      segment.size = 0.22,
+      box.padding = 0.24,
+      point.padding = 0.18,
+      max.overlaps = Inf,
+      seed = 1,
+      xlim = x_limits,
+      ylim = y_limits
+    )
+  } else {
+    NULL
+  }
+
+  ggplot2::ggplot(cluster_summary) +
+    ggplot2::geom_point(
+      ggplot2::aes(
+        x = .data$median_silhouette,
+        y = .data$median_neighborhood_purity,
+        fill = .data[[color_metric]]
+      ),
+      shape = 21,
+      color = "grey25",
+      size = if (for_pdf) 3 else 2.6,
+      stroke = 0.25,
+      alpha = 0.9
+    ) +
+    label_layer +
+    ggplot2::facet_wrap(
+      ~ method_display,
+      ncol = facet_cols
+    ) +
+    ggplot2::coord_cartesian(xlim = x_limits, ylim = y_limits, expand = TRUE) +
+    ggplot2::scale_fill_gradient2(
+      name = color_specs[[color_metric]]$label,
+      low = "blue",
+      mid = "white",
+      high = "firebrick",
+      limits = color_scale$limits,
+      oob = scales::squish,
+      midpoint = color_scale$midpoint,
+      breaks = color_scale$breaks,
+      labels = color_scale$labels,
+      na.value = "grey85"
+    ) +
+    ggplot2::labs(
+      title = "Cluster median silhouette width vs. neighborhood purity",
+      subtitle = paste0(
+        scales::comma(nrow(cluster_summary)),
+        " cluster medians from ",
+        scales::comma(nrow(plot_df)),
+        " cell barcodes"
+      ),
+      x = "Silhouette width",
+      y = "Neighborhood purity"
+    ) +
+    ggplot2::theme_classic(base_size = if (for_pdf) 12 else 11) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold"),
+      strip.background = ggplot2::element_rect(fill = "grey95", color = "grey65"),
+      strip.text = ggplot2::element_text(
+        face = "bold",
+        size = strip_labels$text_size,
+        hjust = 0.5,
+        vjust = 0.5,
+        lineheight = 0.95,
+        margin = ggplot2::margin(5, 0, 5, 0)
+      ),
+      axis.title.x = ggplot2::element_text(margin = ggplot2::margin(t = 8)),
+      axis.title.y = ggplot2::element_text(margin = ggplot2::margin(r = 8)),
+      plot.margin = ggplot2::margin(8, 10, 8, 8)
     )
 }
 
@@ -1239,6 +1673,11 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
       limits = c(-1, 1),
       midpoint = 0
     ),
+    median_neighborhood_purity = list(
+      label = "Median neighborhood purity",
+      limits = c(0, 1),
+      midpoint = 0.5
+    ),
     median_max_jaccard = list(
       label = as.expression(expression(paste("Cluster ", stability[Jaccard]))),
       limits = c(0, 1),
@@ -1254,7 +1693,7 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
   selected_metrics <- c(x_metric, y_metric, color_metric)
   invalid_metrics <- setdiff(selected_metrics, names(metric_specs))
   if (length(invalid_metrics) > 0) {
-    stop("Unknown silhouette/stability metric selection: ", paste(invalid_metrics, collapse = ", "))
+    stop("Unknown cluster-stat metric selection: ", paste(invalid_metrics, collapse = ", "))
   }
 
   if (anyDuplicated(selected_metrics) > 0) {
@@ -1265,9 +1704,17 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
     meta_tbl <- meta_list[[i]]
     downsamp_tbl <- downsamp_list[[i]]
     method <- method_labels[[i]]
-    required_meta_cols <- c("seurat_clusters", "silhouette_width")
+    required_meta_cols <- c(
+      "seurat_clusters",
+      if ("median_silhouette" %in% selected_metrics) "silhouette_width",
+      if ("median_neighborhood_purity" %in% selected_metrics) "neighborhood_purity"
+    )
     missing_meta_cols <- setdiff(required_meta_cols, names(meta_tbl))
-    required_downsamp_cols <- c("clusterid", "max_jaccard")
+    required_downsamp_cols <- if ("median_max_jaccard" %in% selected_metrics) {
+      c("clusterid", "max_jaccard")
+    } else {
+      character()
+    }
     missing_downsamp_cols <- setdiff(required_downsamp_cols, names(downsamp_tbl))
 
     if (length(missing_meta_cols) > 0) {
@@ -1292,7 +1739,7 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
       )
     }
 
-    size_summary <- meta_tbl %>%
+    cluster_summary <- meta_tbl %>%
       dplyr::group_by(clusterid = .data[["seurat_clusters"]]) %>%
       dplyr::summarise(
         cluster_size = dplyr::n(),
@@ -1300,30 +1747,51 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
       ) %>%
       dplyr::mutate(clusterid = as.character(clusterid))
 
-    sil_summary <- meta_tbl %>%
-      dplyr::group_by(clusterid = .data[["seurat_clusters"]]) %>%
-      dplyr::summarise(
-        median_silhouette = median(.data[["silhouette_width"]], na.rm = TRUE),
-        .groups = "drop"
-      ) %>%
-      dplyr::mutate(clusterid = as.character(clusterid))
+    if ("median_silhouette" %in% selected_metrics) {
+      sil_summary <- meta_tbl %>%
+        dplyr::group_by(clusterid = .data[["seurat_clusters"]]) %>%
+        dplyr::summarise(
+          median_silhouette = median(.data[["silhouette_width"]], na.rm = TRUE),
+          .groups = "drop"
+        ) %>%
+        dplyr::mutate(clusterid = as.character(clusterid))
 
-    jac_summary <- downsamp_tbl %>%
-      dplyr::mutate(clusterid = as.character(clusterid)) %>%
-      dplyr::group_by(clusterid) %>%
-      dplyr::summarise(
-        median_max_jaccard = median(max_jaccard, na.rm = TRUE),
-        .groups = "drop"
-      )
+      cluster_summary <- cluster_summary %>%
+        dplyr::inner_join(sil_summary, by = "clusterid")
+    }
 
-    sil_summary %>%
-      dplyr::inner_join(jac_summary, by = "clusterid") %>%
-      dplyr::inner_join(size_summary, by = "clusterid") %>%
+    if ("median_neighborhood_purity" %in% selected_metrics) {
+      purity_summary <- meta_tbl %>%
+        dplyr::group_by(clusterid = .data[["seurat_clusters"]]) %>%
+        dplyr::summarise(
+          median_neighborhood_purity = median(.data[["neighborhood_purity"]], na.rm = TRUE),
+          .groups = "drop"
+        ) %>%
+        dplyr::mutate(clusterid = as.character(clusterid))
+
+      cluster_summary <- cluster_summary %>%
+        dplyr::inner_join(purity_summary, by = "clusterid")
+    }
+
+    if ("median_max_jaccard" %in% selected_metrics) {
+      jac_summary <- downsamp_tbl %>%
+        dplyr::mutate(clusterid = as.character(clusterid)) %>%
+        dplyr::group_by(clusterid) %>%
+        dplyr::summarise(
+          median_max_jaccard = median(max_jaccard, na.rm = TRUE),
+          .groups = "drop"
+        )
+
+      cluster_summary <- cluster_summary %>%
+        dplyr::inner_join(jac_summary, by = "clusterid")
+    }
+
+    cluster_summary %>%
       dplyr::mutate(method = method)
   })
 
   if (nrow(summary_df) == 0) {
-    stop("No clusters remained after joining silhouette and Jaccard summaries.")
+    stop("No clusters remained after joining the selected cluster-stat summaries.")
   }
 
   summary_df <- summary_df %>%
@@ -1335,129 +1803,28 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
   x_spec <- metric_specs[[x_metric]]
   y_spec <- metric_specs[[y_metric]]
   color_spec <- metric_specs[[color_metric]]
+  color_scale <- build_observed_diverging_scale(summary_df[[color_metric]], color_metric)
 
-  render_method_strip_label <- function(label, target_width, min_font_size, base_font_size, max_lines = 3) {
-    label <- stringr::str_squish(as.character(label))
-
-    if (!nzchar(label)) {
-      return(label)
-    }
-
-    split_for_strip <- function(text) {
-      text %>%
-        stringr::str_replace_all("([+_-])", "\\1 ") %>%
-        stringr::str_squish() %>%
-        stringr::str_split("\\s+", simplify = FALSE) %>%
-        purrr::pluck(1)
-    }
-
-    single_line_size <- base_font_size * target_width / max(1, nchar(label))
-    tokens <- split_for_strip(label)
-    has_break_opportunity <- length(tokens) > 1
-
-    should_keep_single_line <- single_line_size >= min_font_size && nchar(label) <= target_width * 0.9
-    if (should_keep_single_line) {
-      return(label)
-    }
-
-    if (!has_break_opportunity) {
-      return(label)
-    }
-
-    token_count <- length(tokens)
-    max_breaks <- min(max_lines - 1, token_count - 1)
-
-    if (max_breaks <= 0) {
-      return(label)
-    }
-
-    best_label <- label
-    best_score <- Inf
-
-    for (break_count in seq_len(max_breaks)) {
-      break_sets <- combn(token_count - 1, break_count, simplify = FALSE)
-
-      for (breaks in break_sets) {
-        starts <- c(1, breaks + 1)
-        ends <- c(breaks, token_count)
-        lines <- purrr::map2_chr(starts, ends, ~ paste(tokens[.x:.y], collapse = " ")) %>%
-          stringr::str_replace_all("\\s+([+_-])$", "\\1")
-        longest_line <- max(nchar(lines), na.rm = TRUE)
-        wrapped_size <- base_font_size * target_width / max(1, longest_line)
-
-        if (wrapped_size < min_font_size && wrapped_size <= single_line_size) {
-          next
-        }
-
-        score <- sum((target_width - nchar(lines))^2) + break_count * 8 - wrapped_size * 6
-
-        if (score < best_score) {
-          best_score <- score
-          best_label <- paste(lines, collapse = "\n")
-        }
-      }
-    }
-
-    best_label
-  }
-
-  mid_cs <- stats::median(summary_df$cluster_size, na.rm = TRUE)
   n_methods <- length(method_labels)
   facet_cols <- max(1, min(max_columns, n_methods))
-  base_strip_size <- if (for_pdf) 11 else 10
-  min_strip_size <- if (for_pdf) 8.5 else 8
-  target_line_chars <- max(22, floor(if (for_pdf) 56 / facet_cols else 50 / facet_cols))
-
-  label_line_width <- function(label) {
-    lines <- stringr::str_split(as.character(label), "\n", simplify = FALSE)[[1]]
-    max(nchar(lines), na.rm = TRUE)
-  }
-
-  candidate_labels <- purrr::map(
-    1:3,
-    ~ purrr::map_chr(
-      method_labels,
-      render_method_strip_label,
-      target_width = target_line_chars,
-      min_font_size = min_strip_size,
-      base_font_size = base_strip_size,
-      max_lines = .x
-    )
-  )
-  candidate_longest_lines <- purrr::map_dbl(candidate_labels, ~ max(purrr::map_int(.x, label_line_width), na.rm = TRUE))
-  candidate_sizes <- purrr::map_dbl(
-    candidate_longest_lines,
-    ~ min(base_strip_size, base_strip_size * target_line_chars / max(1, .x))
-  )
-  chosen_idx <- which(candidate_sizes >= min_strip_size)[1]
-  allow_below_min_strip_size <- is.na(chosen_idx)
-  if (is.na(chosen_idx)) {
-    chosen_idx <- which.max(candidate_sizes)
-  }
-
-  rendered_method_labels <- candidate_labels[[chosen_idx]]
-  longest_rendered_line <- candidate_longest_lines[[chosen_idx]]
-  strip_text_size <- min(base_strip_size, base_strip_size * target_line_chars / max(1, longest_rendered_line))
-  if (!allow_below_min_strip_size) {
-    strip_text_size <- max(min_strip_size, strip_text_size)
-  }
+  strip_labels <- build_method_strip_labels(method_labels, facet_cols, for_pdf = for_pdf)
 
   summary_df <- summary_df %>%
     dplyr::mutate(
       method_display = factor(
-        rendered_method_labels[match(as.character(method), method_labels)],
-        levels = rendered_method_labels
+        strip_labels$labels[match(as.character(.data$method), method_labels)],
+        levels = strip_labels$labels
       )
     )
 
   ggplot2::ggplot(
     summary_df,
     ggplot2::aes(
-      x = .data[[x_metric]],
-      y = .data[[y_metric]],
-      fill = .data[[color_metric]]
-    )
-  ) +
+	      x = .data[[x_metric]],
+	      y = .data[[y_metric]],
+	      fill = .data[[color_metric]]
+	    )
+	  ) +
     ggplot2::geom_point(
       shape = 21,
       color = "black",
@@ -1473,11 +1840,16 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
     ggplot2::scale_y_continuous(limits = y_spec$limits) +
     ggplot2::scale_fill_gradient2(
       name = color_spec$label,
-      low = "blue",
-      mid = "white",
-      high = "firebrick",
-      midpoint = if (is.null(color_spec$midpoint)) stats::median(summary_df[[color_metric]], na.rm = TRUE) else color_spec$midpoint
-    ) +
+	      low = "blue",
+	      mid = "white",
+	      high = "firebrick",
+	      limits = color_scale$limits,
+	      oob = scales::squish,
+	      midpoint = color_scale$midpoint,
+	      breaks = color_scale$breaks,
+	      labels = color_scale$labels,
+	      na.value = "grey85"
+	    ) +
     ggplot2::xlab(x_spec$label) +
     ggplot2::ylab(y_spec$label) +
     ggplot2::theme_bw(base_size = if (for_pdf) 12 else 11) +
@@ -1486,7 +1858,7 @@ ClusterStabilityVsSilhouettePlot <- function(meta_list, downsamp_list, method_la
       strip.background = ggplot2::element_rect(fill = "grey95"),
       strip.text = ggplot2::element_text(
         face = "bold",
-        size = strip_text_size,
+        size = strip_labels$text_size,
         hjust = 0.5,
         vjust = 0.5,
         lineheight = 0.95,
